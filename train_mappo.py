@@ -5,6 +5,7 @@ Ray RLlib MAPPO — SUMO 교차로 신호제어 학습
 다중 교차로(tl_0, tl_1, ...) 확장 시 tls_ids 인자만 추가하면 됩니다.
 """
 import argparse
+import math
 import re
 from pathlib import Path
 
@@ -148,7 +149,7 @@ def main():
             if val is not None:
                 tb_writer.add_scalar(tag, val, i)
 
-        ep_str = f"{ep_len:.0f}" if ep_len == ep_len else "nan"
+        ep_str = f"{ep_len:.0f}" if not math.isnan(ep_len) else "nan"
         print(f"Iter {i:4d}/{args.num_iters} | "
               f"mean_reward={mean_rew:8.2f} | ep_len={ep_str} | steps={int(total_steps)}")
 

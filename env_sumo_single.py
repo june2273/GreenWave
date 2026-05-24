@@ -413,6 +413,7 @@ if __name__ == "__main__":
     done = False
     while not done:
         act = env.action_space.sample()
-        obs, rew, done, _, info = env.step(act)
+        obs, rew, terminated, truncated, info = env.step(act)
+        done = terminated or truncated
     env.close()
     print("done", info)
