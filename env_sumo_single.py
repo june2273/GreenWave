@@ -409,11 +409,14 @@ class SumoSingleIntersectionEnv(gym.Env):
 
 if __name__ == "__main__":
     env = SumoSingleIntersectionEnv()
-    obs, _ = env.reset(seed=42)
-    done = False
-    while not done:
-        act = env.action_space.sample()
-        obs, rew, terminated, truncated, info = env.step(act)
-        done = terminated or truncated
-    env.close()
+    info: dict = {}
+    try:
+        obs, _ = env.reset(seed=42)
+        done = False
+        while not done:
+            act = env.action_space.sample()
+            obs, rew, terminated, truncated, info = env.step(act)
+            done = terminated or truncated
+    finally:
+        env.close()
     print("done", info)

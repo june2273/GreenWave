@@ -125,44 +125,45 @@ def main():
           f"| tls={args.tls_ids} | out={out_path}")
     print(f"TensorBoard: tensorboard --logdir results/tb_mappo")
 
-    for i in range(1, args.num_iters + 1):
-        result = algo.train()
+    try:
+        for i in range(1, args.num_iters + 1):
+            result = algo.train()
 
-        # Ray 2.10+: 지표 경로 변경 (env_runner_results→env_runners, learner_results→learners)
-        env_stats    = result.get("env_runners", {})
-        mean_rew     = env_stats.get("episode_return_mean", float("nan"))
-        ep_len       = env_stats.get("episode_len_mean",    float("nan"))
-        total_steps  = result.get("num_env_steps_sampled_lifetime", 0)
-        tb_writer.add_scalar("reward/mean",       mean_rew,    i)
-        tb_writer.add_scalar("episode/len_mean",  ep_len,      i)
-        tb_writer.add_scalar("train/total_steps", total_steps, i)
+            # Ray 2.10+: 지표 경로 변경 (env_runner_results→env_runners, learner_results→learners)
+            env_stats    = result.get("env_runners", {})
+            mean_rew     = env_stats.get("episode_return_mean", float("nan"))
+            ep_len       = env_stats.get("episode_len_mean",    float("nan"))
+            total_steps  = result.get("num_env_steps_sampled_lifetime", 0)
+            tb_writer.add_scalar("reward/mean",       mean_rew,    i)
+            tb_writer.add_scalar("episode/len_mean",  ep_len,      i)
+            tb_writer.add_scalar("train/total_steps", total_steps, i)
 
-        # 손실 지표 (Ray 2.10+: learners 하위)
-        policy_stats = result.get("learners", {}).get("shared_policy", {})
-        for tag, key in (
-            ("loss/total",   "total_loss"),
-            ("loss/policy",  "policy_loss"),
-            ("loss/value",   "vf_loss"),
-            ("loss/entropy", "entropy"),
-        ):
-            val = policy_stats.get(key)
-            if val is not None:
-                tb_writer.add_scalar(tag, val, i)
+            # 손실 지표 (Ray 2.10+: learners 하위)
+            policy_stats = result.get("learners", {}).get("shared_policy", {})
+            for tag, key in (
+                ("loss/total",   "total_loss"),
+                ("loss/policy",  "policy_loss"),
+                ("loss/value",   "vf_loss"),
+                ("loss/entropy", "entropy"),
+            ):
+                val = policy_stats.get(key)
+                if val is not None:
+                    tb_writer.add_scalar(tag, val, i)
 
-        ep_str = f"{ep_len:.0f}" if not math.isnan(ep_len) else "nan"
-        print(f"Iter {i:4d}/{args.num_iters} | "
-              f"mean_reward={mean_rew:8.2f} | ep_len={ep_str} | steps={int(total_steps)}")
+            ep_str = f"{ep_len:.0f}" if not math.isnan(ep_len) else "nan"
+            print(f"Iter {i:4d}/{args.num_iters} | "
+                  f"mean_reward={mean_rew:8.2f} | ep_len={ep_str} | steps={int(total_steps)}")
 
-        if i % args.checkpoint_freq == 0:
-            ckpt = algo.save(str(out_path))
-            print(f"  → checkpoint: {ckpt}")
+            if i % args.checkpoint_freq == 0:
+                ckpt = algo.save(str(out_path))
+                print(f"  → checkpoint: {ckpt}")
 
-    final_ckpt = algo.save(str(out_path))
-    tb_writer.close()
-    print(f"\n학습 완료. 최종 checkpoint: {final_ckpt}")
-
-    algo.stop()
-    ray.shutdown()
+        final_ckpt = algo.save(str(out_path))
+        print(f"\n학습 완료. 최종 checkpoint: {final_ckpt}")
+    finally:
+        tb_writer.close()
+        algo.stop()
+        ray.shutdown()
 
 
 if __name__ == "__main__":

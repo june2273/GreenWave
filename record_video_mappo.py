@@ -52,26 +52,27 @@ def main():
         max_steps=args.max_steps,
     )
 
-    obs_dict, _ = env.reset(seed=args.seed)
-    frames = [env.render()]  # 초기 상태 프레임 포함
+    try:
+        obs_dict, _ = env.reset(seed=args.seed)
+        frames = [env.render()]  # 초기 상태 프레임 포함
 
-    while env.agents:
-        actions = {
-            agent: int(algo.compute_single_action(
-                obs_dict[agent], policy_id="shared_policy"
-            ))
-            for agent in env.agents
-        }
-        obs_dict, _, _, _, _ = env.step(actions)
-        frames.append(env.render())
+        while env.agents:
+            actions = {
+                agent: int(algo.compute_single_action(
+                    obs_dict[agent], policy_id="shared_policy"
+                ))
+                for agent in env.agents
+            }
+            obs_dict, _, _, _, _ = env.step(actions)
+            frames.append(env.render())
+    finally:
+        env.close()
+        algo.stop()
+        ray.shutdown()
 
     out_path = Path(args.output)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     imageio.mimsave(out_path, frames, fps=args.fps)
-
-    env.close()
-    algo.stop()
-    ray.shutdown()
     print(f"Saved video: {out_path}  ({len(frames)} frames @ {args.fps}fps)")
 
 

@@ -64,16 +64,13 @@ def main():
         tensorboard_log="./results/tb_dqn",  # TensorBoard 로그 저장 경로
     )
 
-    # 학습 실행
-    model.learn(total_timesteps=args.timesteps, progress_bar=True)
-
-    # 학습 모델 저장(.zip)
     out_path = Path(args.model_out)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    model.save(str(out_path))
-
-    # TraCI 연결 정리
-    env.close()
+    try:
+        model.learn(total_timesteps=args.timesteps, progress_bar=True)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        model.save(str(out_path))
+    finally:
+        env.close()
     print(f"Saved model to: {out_path}.zip")
 
 

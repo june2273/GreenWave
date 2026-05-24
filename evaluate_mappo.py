@@ -70,57 +70,61 @@ def main():
 
     rows = []
 
-    # ── MAPPO 평가 ────────────────────────────────────────────────────────
-    env_mappo = SumoParallelEnv(**env_kwargs)
+    try:
+        # ── MAPPO 평가 ────────────────────────────────────────────────────────
+        env_mappo = SumoParallelEnv(**env_kwargs)
 
-    def mappo_action(obs_dict, step_idx, agents):
-        return {
-            agent: int(algo.compute_single_action(
-                obs_dict[agent], policy_id="shared_policy"
-            ))
-            for agent in agents
-        }
+        def mappo_action(obs_dict, step_idx, agents):
+            return {
+                agent: int(algo.compute_single_action(
+                    obs_dict[agent], policy_id="shared_policy"
+                ))
+                for agent in agents
+            }
 
-    for ep in range(args.episodes):
-        info = run_episode(env_mappo, mappo_action, seed=args.seed + ep)
-        rows.append({
-            "algorithm": "MAPPO",
-            "episode": ep,
-            "avg_waiting_time":  info.get("avg_waiting_time",  np.nan),
-            "avg_travel_time":   info.get("avg_travel_time",   np.nan),
-            "total_queue_length": info.get("total_queue_length", np.nan),
-            "throughput":        info.get("throughput",         np.nan),
-        })
-        print(f"[MAPPO]     ep={ep} | "
-              f"wait={rows[-1]['avg_waiting_time']:.1f}s | "
-              f"queue={rows[-1]['total_queue_length']:.0f}")
+        try:
+            for ep in range(args.episodes):
+                info = run_episode(env_mappo, mappo_action, seed=args.seed + ep)
+                rows.append({
+                    "algorithm": "MAPPO",
+                    "episode": ep,
+                    "avg_waiting_time":  info.get("avg_waiting_time",  np.nan),
+                    "avg_travel_time":   info.get("avg_travel_time",   np.nan),
+                    "total_queue_length": info.get("total_queue_length", np.nan),
+                    "throughput":        info.get("throughput",         np.nan),
+                })
+                print(f"[MAPPO]     ep={ep} | "
+                      f"wait={rows[-1]['avg_waiting_time']:.1f}s | "
+                      f"queue={rows[-1]['total_queue_length']:.0f}")
+        finally:
+            env_mappo.close()
 
-    env_mappo.close()
+        # ── Fixed-time baseline ───────────────────────────────────────────────
+        env_fix = SumoParallelEnv(**env_kwargs)
 
-    # ── Fixed-time baseline ───────────────────────────────────────────────
-    env_fix = SumoParallelEnv(**env_kwargs)
+        def fixed_action(obs_dict, step_idx, agents):
+            phase = int((step_idx // args.baseline_phase_steps) % 4)
+            return {agent: phase for agent in agents}
 
-    def fixed_action(obs_dict, step_idx, agents):
-        phase = int((step_idx // args.baseline_phase_steps) % 4)
-        return {agent: phase for agent in agents}
-
-    for ep in range(args.episodes):
-        info = run_episode(env_fix, fixed_action, seed=args.seed + 1000 + ep)
-        rows.append({
-            "algorithm": "FixedTime",
-            "episode": ep,
-            "avg_waiting_time":  info.get("avg_waiting_time",  np.nan),
-            "avg_travel_time":   info.get("avg_travel_time",   np.nan),
-            "total_queue_length": info.get("total_queue_length", np.nan),
-            "throughput":        info.get("throughput",         np.nan),
-        })
-        print(f"[FixedTime] ep={ep} | "
-              f"wait={rows[-1]['avg_waiting_time']:.1f}s | "
-              f"queue={rows[-1]['total_queue_length']:.0f}")
-
-    env_fix.close()
-    algo.stop()
-    ray.shutdown()
+        try:
+            for ep in range(args.episodes):
+                info = run_episode(env_fix, fixed_action, seed=args.seed + 1000 + ep)
+                rows.append({
+                    "algorithm": "FixedTime",
+                    "episode": ep,
+                    "avg_waiting_time":  info.get("avg_waiting_time",  np.nan),
+                    "avg_travel_time":   info.get("avg_travel_time",   np.nan),
+                    "total_queue_length": info.get("total_queue_length", np.nan),
+                    "throughput":        info.get("throughput",         np.nan),
+                })
+                print(f"[FixedTime] ep={ep} | "
+                      f"wait={rows[-1]['avg_waiting_time']:.1f}s | "
+                      f"queue={rows[-1]['total_queue_length']:.0f}")
+        finally:
+            env_fix.close()
+    finally:
+        algo.stop()
+        ray.shutdown()
 
     # ── 저장 및 출력 ──────────────────────────────────────────────────────
     df = pd.DataFrame(rows)

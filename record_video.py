@@ -37,21 +37,22 @@ def main():
     )
     model = DQN.load(args.model)
 
-    obs, _ = env.reset(seed=args.seed)
-    done = False
-    frames = [env.render()]
+    try:
+        obs, _ = env.reset(seed=args.seed)
+        done = False
+        frames = [env.render()]
 
-    while not done:
-        action, _ = model.predict(obs, deterministic=True)
-        obs, _, terminated, truncated, _ = env.step(int(action))
-        done = bool(terminated or truncated)
-        frames.append(env.render())
+        while not done:
+            action, _ = model.predict(obs, deterministic=True)
+            obs, _, terminated, truncated, _ = env.step(int(action))
+            done = bool(terminated or truncated)
+            frames.append(env.render())
+    finally:
+        env.close()
 
     out_path = Path(args.output)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     imageio.mimsave(out_path, frames, fps=args.fps)
-
-    env.close()
     print(f"Saved video: {out_path}")
 
 

@@ -57,21 +57,22 @@ def main():
         action, _ = model.predict(obs, deterministic=True)
         return int(action)
 
-    for ep in range(args.episodes):
-        seed = args.seed + ep
-        info = run_episode(env_dqn, dqn_action, seed=seed)
-        rows.append(
-            {
-                "algorithm": "DQN",
-                "episode": ep,
-                "avg_waiting_time": info.get("avg_waiting_time", np.nan),
-                "avg_travel_time": info.get("avg_travel_time", np.nan),
-                "total_queue_length": info.get("total_queue_length", np.nan),
-                "throughput": info.get("throughput", np.nan),
-            }
-        )
-
-    env_dqn.close()
+    try:
+        for ep in range(args.episodes):
+            seed = args.seed + ep
+            info = run_episode(env_dqn, dqn_action, seed=seed)
+            rows.append(
+                {
+                    "algorithm": "DQN",
+                    "episode": ep,
+                    "avg_waiting_time": info.get("avg_waiting_time", np.nan),
+                    "avg_travel_time": info.get("avg_travel_time", np.nan),
+                    "total_queue_length": info.get("total_queue_length", np.nan),
+                    "throughput": info.get("throughput", np.nan),
+                }
+            )
+    finally:
+        env_dqn.close()
 
     # Fixed-time baseline (4-phase cyclic)
     env_fix = SumoSingleIntersectionEnv(
@@ -85,21 +86,22 @@ def main():
     def fixed_action(obs, step_idx):
         return int((step_idx // args.baseline_phase_steps) % 4)
 
-    for ep in range(args.episodes):
-        seed = args.seed + 1000 + ep
-        info = run_episode(env_fix, fixed_action, seed=seed)
-        rows.append(
-            {
-                "algorithm": "FixedTime",
-                "episode": ep,
-                "avg_waiting_time": info.get("avg_waiting_time", np.nan),
-                "avg_travel_time": info.get("avg_travel_time", np.nan),
-                "total_queue_length": info.get("total_queue_length", np.nan),
-                "throughput": info.get("throughput", np.nan),
-            }
-        )
-
-    env_fix.close()
+    try:
+        for ep in range(args.episodes):
+            seed = args.seed + 1000 + ep
+            info = run_episode(env_fix, fixed_action, seed=seed)
+            rows.append(
+                {
+                    "algorithm": "FixedTime",
+                    "episode": ep,
+                    "avg_waiting_time": info.get("avg_waiting_time", np.nan),
+                    "avg_travel_time": info.get("avg_travel_time", np.nan),
+                    "total_queue_length": info.get("total_queue_length", np.nan),
+                    "throughput": info.get("throughput", np.nan),
+                }
+            )
+    finally:
+        env_fix.close()
 
     df = pd.DataFrame(rows)
     out_path = Path(args.csv_out)
