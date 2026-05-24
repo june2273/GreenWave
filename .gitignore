@@ -249,5 +249,18 @@ cython_debug/
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
 
+# --- GreenWave generated artifacts ---
+# Trained model checkpoints
 models/
+# Keep samples directory (curated reference artifacts)
+!samples/
+
+# Evaluation results & TensorBoard logs
+results/
+
+# Recorded rollout videos
+videos/
+
+# Auto-generated SUMO network (rebuilt by _maybe_build_network() at runtime)
+sumo_data/single_intersection.net.xml
 
