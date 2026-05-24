@@ -10,6 +10,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import ray
+import torch
 from ray.rllib.algorithms.ppo import PPO
 from ray.rllib.env.wrappers.pettingzoo_env import ParallelPettingZooEnv
 from ray.tune.registry import register_env
@@ -59,6 +60,7 @@ def main():
     register_env("sumo_pz", _make_env)
     ray.init(ignore_reinit_error=True)
     algo = PPO.from_checkpoint(str(Path(args.model).resolve()))
+    module = algo.get_module("shared_policy")
 
     env_kwargs = dict(
         use_gui=False,
@@ -76,9 +78,12 @@ def main():
 
         def mappo_action(obs_dict, step_idx, agents):
             return {
-                agent: int(algo.compute_single_action(
-                    obs_dict[agent], policy_id="shared_policy"
-                ))
+                agent: int(torch.argmax(
+                    module.forward_inference(
+                        {"obs": torch.tensor(obs_dict[agent][None], dtype=torch.float32)}
+                    )["action_dist_inputs"],
+                    dim=-1,
+                ).item())
                 for agent in agents
             }
 
