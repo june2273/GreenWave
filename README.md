@@ -77,7 +77,7 @@ GreenWave/
 |------|------|
 | 행동 `Discrete(4)` | 0=North / 1=South / 2=East / 3=West 단독 green |
 | 관측 `shape=(10,)` | `[queue×4, speed×4, phase_norm, elapsed_norm]` |
-| 보상 | `−total_queue_length` (담당 교차로 진입 차선 대기 차량 합) |
+| 보상 | `−(queue_length / 10) + (step_arrivals × 0.5)` — 대기열 패널티 + 처리량 보너스 |
 | 제약 | phase 변경 시 yellow 삽입, minimum green time 적용 |
 
 ### 시스템 구조도
@@ -105,8 +105,8 @@ SumoParallelEnv (PettingZoo ParallelEnv)
 # 빠른 테스트 (20 iter ≈ 80k steps, ~5분)
 python train_mappo.py --num-iters 20 --num-workers 0
 
-# 본 학습 (200 iter)
-python train_mappo.py --num-iters 200 --num-workers 1
+# 본 학습 (200 iter, 재현 가능)
+python train_mappo.py --num-iters 200 --num-workers 1 --seed 42
 
 # 저장 경로 직접 지정
 python train_mappo.py --num-iters 200 --out models/MAPPO_sumo_exp1
@@ -124,6 +124,7 @@ python train_mappo.py --tls-ids C D E --num-workers 3
 | `--out` | 자동 | 체크포인트 저장 경로 (`models/MAPPO_sumo_N` 자동 버전) |
 | `--checkpoint-freq` | 20 | 중간 체크포인트 주기 (iter 단위) |
 | `--tls-ids` | `["C"]` | SUMO TLS id 목록 (다중 교차로 확장 시 추가) |
+| `--seed` | 42 | 전역 랜덤 시드 (random / numpy / torch 일괄 설정) |
 
 **스텝 수 계산**
 
@@ -136,15 +137,26 @@ iter 1회 ≈ 5~6 에피소드
 ### 2. 평가
 
 ```bash
-# MAPPO vs Fixed-time 비교 (결과: results/eval_metrics_mappo.csv)
+# MAPPO vs Fixed-time 쌍대 비교
+# 출력: results/eval_metrics_mappo_N.csv  (N = 모델 버전 번호 자동)
 python evaluate_mappo.py --model models/MAPPO_sumo_1 --episodes 5
+
+# 학습 시 tls-ids를 변경했다면 동일하게 전달
+python evaluate_mappo.py --model models/MAPPO_sumo_1 --tls-ids C
 ```
+
+> **쌍대 비교**: 동일 에피소드 인덱스에 동일 SUMO seed를 사용해  
+> 교통 수요 차이가 아닌 정책 자체의 성능 차이만 측정합니다.  
+> CSV에 `seed` 컬럼이 포함되어 쌍 확인이 가능합니다.
 
 ### 3. 롤아웃 영상 저장
 
 ```bash
-# 영상 저장 (결과: videos/mappo_policy_rollout.mp4)
+# 출력: videos/mappo_policy_rollout_N.mp4  (N = 모델 버전 번호 자동)
 python record_video_mappo.py --model models/MAPPO_sumo_1
+
+# 학습 시 tls-ids를 변경했다면 동일하게 전달
+python record_video_mappo.py --model models/MAPPO_sumo_1 --tls-ids C
 ```
 
 ---
@@ -182,19 +194,31 @@ tensorboard --logdir results/tb_mappo
 ## 체크포인트 복원
 
 ```python
+import torch
 from ray.rllib.algorithms.ppo import PPO
+
 algo = PPO.from_checkpoint("models/MAPPO_sumo_1")
+module = algo.get_module("shared_policy")   # RLModule API (Ray 2.10+)
+
 obs, _ = env.reset()
-action = algo.compute_single_action(obs, policy_id="shared_policy")
+action = int(torch.argmax(
+    module.forward_inference(
+        {"obs": torch.tensor(obs[None], dtype=torch.float32)}
+    )["action_dist_inputs"],
+    dim=-1,
+).item())
 ```
 
 ---
 
 ## 참고
 
-- `sumo_data/single_intersection.net.xml` 이 없으면 첫 실행 시 `netconvert`로 자동 생성
+- `sumo_data/single_intersection.net.xml` 이 없으면 첫 실행 시 `netconvert`로 자동 생성 (임시 파일 → atomic rename으로 병렬 worker 충돌 방지)
 - RLlib 체크포인트는 디렉터리 형식으로 저장 (`models/MAPPO_sumo_N/`)
 - `--num-workers 0`: driver process에서 직접 롤아웃 (디버깅 용이, SUMO 1개)
 - `--num-workers N≥1`: 별도 worker process로 SUMO N개 병렬 실행 (학습 속도 향상)
 - SUMO 시뮬레이션은 CPU 전용 / RLlib(PyTorch)은 CPU 학습 (M4 Mac MPS 미지원)
+- `--seed` 로 random / numpy / torch 시드를 일괄 설정해 실험 재현성 확보
+- 잘못된 `--tls-ids` 전달 시 TraCI 연결 직후 명확한 에러 메시지로 조기 종료
+- 평가 출력 파일은 모델 버전을 자동 반영 (`eval_metrics_mappo_N.csv`, `mappo_policy_rollout_N.mp4`)
 - 주요 산출물(`models/`, `results/`, `videos/`)은 gitignored — 참조용 샘플은 `samples/` 참조

@@ -1,6 +1,8 @@
 import functools
+import os
 import shutil
 import subprocess
+import tempfile
 import uuid
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -15,7 +17,7 @@ try:
 except ImportError as exc:
     raise ImportError(
         "SUMO Python tools(traci, sumolib)가 필요합니다. "
-        "SUMO 설치 후 PYTHONPATH에 $SUMO_HOME/tools를 추가하세요."
+        "pip install traci sumolib 또는 $SUMO_HOME/tools를 PYTHONPATH에 추가하세요."
     ) from exc
 
 
@@ -28,7 +30,7 @@ class SumoParallelEnv(ParallelEnv):
 
     행동(Discrete 4): 0=North / 1=South / 2=East / 3=West 단독 green
     관측(shape 10): [queue×4, speed×4, phase_norm, elapsed_norm]
-    보상: -total_queue_length (담당 교차로 진입 전체 대기 차량 합)
+    보상: -(queue_length / 10) + (step_arrivals × 0.5)  — 대기열 패널티 + 처리량 보너스
     """
 
     metadata = {
@@ -53,9 +55,14 @@ class SumoParallelEnv(ParallelEnv):
     ):
         self.base_dir = Path(__file__).resolve().parent
         self.sumo_data_dir = self.base_dir / "sumo_data"
-        self.sumo_cfg = (
-            Path(sumo_cfg) if sumo_cfg else self.sumo_data_dir / "single.sumocfg"
-        )
+        if sumo_cfg:
+            self.sumo_cfg = Path(sumo_cfg).resolve()
+            if not self.sumo_cfg.exists():
+                raise FileNotFoundError(
+                    f"SUMO 설정 파일을 찾을 수 없습니다: {self.sumo_cfg}"
+                )
+        else:
+            self.sumo_cfg = self.sumo_data_dir / "single.sumocfg"
         self._maybe_build_network()
 
         self.use_gui = use_gui
@@ -133,19 +140,29 @@ class SumoParallelEnv(ParallelEnv):
             raise FileNotFoundError(
                 "single_intersection.net.xml이 없고 netconvert도 찾을 수 없습니다."
             )
-        cmd = [
-            netconvert,
-            "--node-files", str(self.sumo_data_dir / "nodes.nod.xml"),
-            "--edge-files", str(self.sumo_data_dir / "edges.edg.xml"),
-            "--connection-files", str(self.sumo_data_dir / "connections.con.xml"),
-            "--tllogic-files", str(self.sumo_data_dir / "tls.tll.xml"),
-            "-o", str(net_file),
-        ]
-        result = subprocess.run(cmd, capture_output=True, text=True)
-        if result.returncode != 0:
-            raise RuntimeError(
-                f"netconvert 네트워크 생성 실패.\n{result.stderr}"
-            )
+        # 임시 파일에 먼저 생성 후 atomic rename → 병렬 worker 동시 시작 시 TOCTOU 방지
+        tmp_fd, tmp_path = tempfile.mkstemp(
+            suffix=".net.xml", dir=self.sumo_data_dir
+        )
+        os.close(tmp_fd)
+        try:
+            cmd = [
+                netconvert,
+                "--node-files", str(self.sumo_data_dir / "nodes.nod.xml"),
+                "--edge-files", str(self.sumo_data_dir / "edges.edg.xml"),
+                "--connection-files", str(self.sumo_data_dir / "connections.con.xml"),
+                "--tllogic-files", str(self.sumo_data_dir / "tls.tll.xml"),
+                "-o", tmp_path,
+            ]
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            if result.returncode != 0:
+                raise RuntimeError(
+                    f"netconvert 네트워크 생성 실패.\n{result.stderr}"
+                )
+            os.replace(tmp_path, net_file)  # POSIX atomic
+        except Exception:
+            Path(tmp_path).unlink(missing_ok=True)
+            raise
 
     def _sumo_binary(self) -> str:
         preferred = "sumo-gui" if self.use_gui else "sumo"
@@ -170,6 +187,16 @@ class SumoParallelEnv(ParallelEnv):
         ]
         traci.start(cmd, label=self._conn_label)
         self.conn = traci.getConnection(self._conn_label)
+
+        # TLS 존재 얼리 페일: 잘못된 tls_ids는 _find_yellow_phase_index에서 불명확하게
+        # 실패하므로 TraCI 연결 직후 명시적으로 검증
+        known_tls = set(self.conn.trafficlight.getIDList())
+        missing = [tid for tid in self._tls_ids if tid not in known_tls]
+        if missing:
+            raise ValueError(
+                f"SUMO 네트워크에 존재하지 않는 TLS ID: {missing}. "
+                f"사용 가능한 TLS: {sorted(known_tls)}"
+            )
 
         for agent in self.possible_agents:
             tls_id = self._agent_to_tls[agent]

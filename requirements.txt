@@ -4,7 +4,7 @@ gymnasium>=0.29.0
 pettingzoo>=1.24.0
 
 # MAPPO: Ray RLlib (멀티에이전트 PPO)
-ray[rllib]>=2.9.0
+ray[rllib]>=2.10.0
 
 # DQN 베이스라인 비교용 (train_dqn.py + evaluate.py)
 stable-baselines3>=2.3.0

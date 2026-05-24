@@ -6,11 +6,13 @@ Ray RLlib MAPPO — SUMO 교차로 신호제어 학습
 """
 import argparse
 import math
+import random
 import re
 from pathlib import Path
 
 import numpy as np
 import ray
+import torch
 from torch.utils.tensorboard import SummaryWriter
 from gymnasium import spaces
 from ray.rllib.algorithms.ppo import PPOConfig
@@ -63,11 +65,18 @@ def parse_args():
     # 다중 교차로 확장 시: --tls-ids C D E ...
     p.add_argument("--tls-ids", nargs="+", default=["C"],
                    help="SUMO 네트워크 내 TLS id 목록 (단일: C)")
+    p.add_argument("--seed", type=int, default=42,
+                   help="전역 랜덤 시드 (random/numpy/torch/SUMO 일괄 설정)")
     return p.parse_args()
 
 
 def main():
     args = parse_args()
+
+    # 전역 시드 설정 (재현성 확보)
+    random.seed(args.seed)
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
 
     register_env("sumo_pz", _make_env)
     ray.init(ignore_reinit_error=True)
@@ -123,7 +132,7 @@ def main():
     run_name = Path(out_path).name
     tb_writer = SummaryWriter(log_dir=f"results/tb_mappo/{run_name}")
     print(f"학습 시작 | iters={args.num_iters} | workers={args.num_workers} "
-          f"| tls={args.tls_ids} | out={out_path}")
+          f"| tls={args.tls_ids} | seed={args.seed} | out={out_path}")
     print(f"TensorBoard: tensorboard --logdir results/tb_mappo")
 
     try:
