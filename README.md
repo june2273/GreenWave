@@ -78,8 +78,10 @@ source ~/.bashrc
 
 ## 폴더 구조
 
-- `env_sumo_single.py`: Gymnasium 환경
-- `train_dqn.py`: DQN 학습
+- `env_sumo_single.py`: Gymnasium 환경 (SB3 DQN용)
+- `env_sumo_pz.py`: PettingZoo Parallel 환경 (RLlib MAPPO용, 다중 교차로 확장 가능)
+- `train_dqn.py`: SB3 DQN 학습
+- `train_mappo.py`: RLlib MAPPO 학습
 - `evaluate.py`: DQN vs Fixed-time 지표 집계 + CSV 저장
 - `record_video.py`: 최종 정책 실행 영상(mp4) 생성
 - `sumo_data/`: SUMO 네트워크/경로/신호/설정 파일
@@ -127,7 +129,7 @@ flowchart LR
 
 ## 실행 순서
 
-작업 디렉터리: `03_traffic_signal_control`
+### DQN (SB3 / 단일 에이전트)
 
 1. DQN 학습
 
@@ -148,6 +150,46 @@ python evaluate.py --model models/dqn_sumo_single.zip --episodes 5
 ```bash
 python record_video.py --model models/dqn_sumo_single.zip --output videos/dqn_policy_rollout.mp4
 ```
+
+### MAPPO (RLlib / 멀티에이전트)
+
+1. MAPPO 학습 (저장 경로 자동 버전: `models/MAPPO_sumo_1`, `models/MAPPO_sumo_2`, ...)
+
+```bash
+# 테스트 (20 iter ≈ 80k steps, ~5분)
+python train_mappo.py --num-iters 20 --num-workers 0
+
+# 풀 학습 (300k steps 수준)
+python train_mappo.py --num-iters 100 --num-workers 0
+
+# 저장 경로 직접 지정
+python train_mappo.py --num-iters 100 --out models/MAPPO_sumo_test
+```
+
+- 체크포인트: `models/MAPPO_sumo_N/` (디렉터리 형식, RLlib 포맷)
+- 복원: `from ray.rllib.algorithms.ppo import PPO; algo = PPO.from_checkpoint("models/MAPPO_sumo_1")`
+
+## TensorBoard
+
+학습 중 또는 학습 후 별도 터미널에서 실행
+
+```bash
+# DQN + MAPPO 동시에 보기
+tensorboard --logdir results/
+
+# MAPPO만 보기
+tensorboard --logdir results/tb_mappo
+
+# DQN만 보기
+tensorboard --logdir results/tb_dqn
+```
+
+브라우저에서 `http://localhost:6006` 접속
+
+| 알고리즘 | 로그 경로 | 주요 지표 |
+|---|---|---|
+| DQN | `results/tb_dqn/` | `rollout/ep_rew_mean`, `train/loss` |
+| MAPPO | `results/tb_mappo/MAPPO_sumo_N/` | `reward/mean`, `loss/total`, `loss/policy`, `loss/value` |
 
 ## 참고
 

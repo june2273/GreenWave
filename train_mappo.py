@@ -5,10 +5,12 @@ Ray RLlib MAPPO — SUMO 교차로 신호제어 학습
 다중 교차로(tl_0, tl_1, ...) 확장 시 tls_ids 인자만 추가하면 됩니다.
 """
 import argparse
+import re
 from pathlib import Path
 
 import numpy as np
 import ray
+from torch.utils.tensorboard import SummaryWriter
 from gymnasium import spaces
 from ray.rllib.algorithms.ppo import PPOConfig
 from ray.rllib.env.wrappers.pettingzoo_env import ParallelPettingZooEnv
@@ -25,15 +27,34 @@ def _make_env(config: dict) -> ParallelPettingZooEnv:
     return ParallelPettingZooEnv(SumoParallelEnv(**config))
 
 
+def _next_out_path(algo: str = "MAPPO", model_dir: str = "models") -> str:
+    """models/ 에서 {algo}_sumo_N 패턴의 다음 버전 경로를 반환.
+
+    기존에 MAPPO_sumo_1, MAPPO_sumo_2 가 있으면 MAPPO_sumo_3 을 반환.
+    RLlib 체크포인트는 디렉터리 형식으로 저장되므로 확장자 없이 사용.
+    (SB3의 .zip 과 달리 RLlib 은 디렉터리 기반 체크포인트)
+    """
+    d = Path(model_dir)
+    d.mkdir(parents=True, exist_ok=True)
+    pat = re.compile(rf"^{re.escape(algo)}_sumo_(\d+)$")
+    versions = [
+        int(m.group(1))
+        for entry in d.iterdir()
+        if (m := pat.match(entry.name))
+    ]
+    return str(d / f"{algo}_sumo_{max(versions, default=0) + 1}")
+
+
 def parse_args():
     p = argparse.ArgumentParser(description="Train MAPPO on SUMO intersection(s)")
     p.add_argument("--num-iters", type=int, default=200,
                    help="학습 반복 횟수 (1 iter = train_batch_size 스텝 수집 후 업데이트)")
     p.add_argument("--num-workers", type=int, default=1,
                    help="RLlib rollout worker 수 (SUMO 병렬 인스턴스 수)")
-    p.add_argument("--checkpoint-out", type=str, default="models/mappo_sumo_single")
+    p.add_argument("--out", type=str, default=None,
+                   help="저장 경로 (미지정 시 models/MAPPO_sumo_N 자동 버전 생성)")
     p.add_argument("--checkpoint-freq", type=int, default=20,
-                   help="체크포인트 저장 주기 (iter 단위)")
+                   help="중간 체크포인트 저장 주기 (iter 단위)")
     p.add_argument("--max-steps", type=int, default=3600)
     p.add_argument("--delta-time", type=int, default=5)
     p.add_argument("--min-green", type=int, default=10)
@@ -93,25 +114,50 @@ def main():
     )
 
     algo = config.build_algo()
-    checkpoint_dir = Path(args.checkpoint_out)
-    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    # algo.save()는 절대 경로 필요 (pyarrow URI 파싱 때문에 상대 경로 불가)
+    out_path = str(Path(args.out if args.out else _next_out_path()).resolve())
+    Path(out_path).mkdir(parents=True, exist_ok=True)
 
+    run_name = Path(out_path).name
+    tb_writer = SummaryWriter(log_dir=f"results/tb_mappo/{run_name}")
     print(f"학습 시작 | iters={args.num_iters} | workers={args.num_workers} "
-          f"| tls={args.tls_ids}")
+          f"| tls={args.tls_ids} | out={out_path}")
+    print(f"TensorBoard: tensorboard --logdir results/tb_mappo")
 
     for i in range(1, args.num_iters + 1):
         result = algo.train()
 
-        mean_rew = result.get("episode_reward_mean", float("nan"))
-        ep_len = result.get("episode_len_mean", float("nan"))
+        # Ray 2.10+: 지표 경로 변경 (env_runner_results→env_runners, learner_results→learners)
+        env_stats    = result.get("env_runners", {})
+        mean_rew     = env_stats.get("episode_return_mean", float("nan"))
+        ep_len       = env_stats.get("episode_len_mean",    float("nan"))
+        total_steps  = result.get("num_env_steps_sampled_lifetime", 0)
+        tb_writer.add_scalar("reward/mean",       mean_rew,    i)
+        tb_writer.add_scalar("episode/len_mean",  ep_len,      i)
+        tb_writer.add_scalar("train/total_steps", total_steps, i)
+
+        # 손실 지표 (Ray 2.10+: learners 하위)
+        policy_stats = result.get("learners", {}).get("shared_policy", {})
+        for tag, key in (
+            ("loss/total",   "total_loss"),
+            ("loss/policy",  "policy_loss"),
+            ("loss/value",   "vf_loss"),
+            ("loss/entropy", "entropy"),
+        ):
+            val = policy_stats.get(key)
+            if val is not None:
+                tb_writer.add_scalar(tag, val, i)
+
+        ep_str = f"{ep_len:.0f}" if ep_len == ep_len else "nan"
         print(f"Iter {i:4d}/{args.num_iters} | "
-              f"mean_reward={mean_rew:8.2f} | ep_len={ep_len:.0f}")
+              f"mean_reward={mean_rew:8.2f} | ep_len={ep_str} | steps={int(total_steps)}")
 
         if i % args.checkpoint_freq == 0:
-            ckpt = algo.save(str(checkpoint_dir))
+            ckpt = algo.save(str(out_path))
             print(f"  → checkpoint: {ckpt}")
 
-    final_ckpt = algo.save(str(checkpoint_dir))
+    final_ckpt = algo.save(str(out_path))
+    tb_writer.close()
     print(f"\n학습 완료. 최종 checkpoint: {final_ckpt}")
 
     algo.stop()
