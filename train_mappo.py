@@ -111,7 +111,7 @@ def main():
             clip_param=0.2,       # PPO clip ε
             vf_loss_coeff=1.0,    # 보상 스케일 다운 후 VF loss 가중치 높임
             entropy_coeff=0.01,
-            vf_clip_param=100.0,  # 기본값 10.0이 reward scale(-35000)과 충돌해 VF가 학습 안됨
+            vf_clip_param=500.0,  # reward scale 조정 후 discounted return 범위 -300~-500, 여유 있게 설정
         )
     )
 
