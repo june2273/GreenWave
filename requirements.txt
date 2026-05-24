@@ -1,0 +1,29 @@
+# RL 환경 인터페이스
+gymnasium>=0.29.0
+# PettingZoo Parallel API (env_sumo_pz.py)
+pettingzoo>=1.24.0
+
+# MAPPO: Ray RLlib (멀티에이전트 PPO)
+ray[rllib]>=2.9.0
+
+# DQN 베이스라인 비교용 (train_dqn.py + evaluate.py)
+stable-baselines3>=2.3.0
+rich>=13.0.0
+tensorboard>=2.9.1
+
+# PyTorch — Apple Silicon(M-series) MPS 백엔드 지원
+torch>=2.3.0
+
+# 수치 계산 / 데이터 처리
+numpy>=1.24.0
+pandas>=2.0.0,<3.0.0
+
+# 영상 저장 (imageio-ffmpeg 가 ffmpeg 바이너리 자동 다운로드)
+imageio>=2.33.0
+imageio-ffmpeg>=0.4.9
+
+# SUMO Python 인터페이스
+# Homebrew 설치 버전(1.20.0)과 맞춰 pip 패키지도 동일 버전 고정
+# → PYTHONPATH 설정 없이 import traci / import sumolib 가능
+traci==1.20.0
+sumolib==1.20.0
