@@ -35,6 +35,8 @@ def parse_args():
     p.add_argument("--delta-time", type=int, default=5)
     p.add_argument("--min-green", type=int, default=10)
     p.add_argument("--yellow-time", type=int, default=2)
+    p.add_argument("--tls-ids", nargs="+", default=["C"],
+                   help="SUMO 네트워크 내 TLS id 목록 (단일: C)")
     return p.parse_args()
 
 
@@ -52,6 +54,7 @@ def main():
         min_green=args.min_green,
         yellow_time=args.yellow_time,
         max_steps=args.max_steps,
+        tls_ids=args.tls_ids,
     )
 
     try:

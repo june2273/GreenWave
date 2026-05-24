@@ -77,7 +77,7 @@ GreenWave/
 |------|------|
 | 행동 `Discrete(4)` | 0=North / 1=South / 2=East / 3=West 단독 green |
 | 관측 `shape=(10,)` | `[queue×4, speed×4, phase_norm, elapsed_norm]` |
-| 보상 | `−total_queue_length` (담당 교차로 진입 차선 대기 차량 합) |
+| 보상 | `-(queue_length/10) + (step_throughput × 0.5)` |
 | 제약 | phase 변경 시 yellow 삽입, minimum green time 적용 |
 
 ### 시스템 구조도
@@ -123,6 +123,7 @@ python train_mappo.py --tls-ids C D E --num-workers 3
 | `--num-workers` | 1 | Ray env runner 수 (0=driver 직접 수행, 디버깅 권장) |
 | `--out` | 자동 | 체크포인트 저장 경로 (`models/MAPPO_sumo_N` 자동 버전) |
 | `--checkpoint-freq` | 20 | 중간 체크포인트 주기 (iter 단위) |
+| `--seed` | 42 | 전역 랜덤 시드 (재현성) |
 | `--tls-ids` | `["C"]` | SUMO TLS id 목록 (다중 교차로 확장 시 추가) |
 
 **스텝 수 계산**

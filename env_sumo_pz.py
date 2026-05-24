@@ -1,6 +1,8 @@
 import functools
+import os
 import shutil
 import subprocess
+import tempfile
 import uuid
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -15,7 +17,7 @@ try:
 except ImportError as exc:
     raise ImportError(
         "SUMO Python tools(traci, sumolib)가 필요합니다. "
-        "SUMO 설치 후 PYTHONPATH에 $SUMO_HOME/tools를 추가하세요."
+        "pip install traci sumolib 또는 $SUMO_HOME/tools를 PYTHONPATH에 추가하세요."
     ) from exc
 
 
@@ -50,12 +52,18 @@ class SumoParallelEnv(ParallelEnv):
         max_steps: int = 3600,
         reward_mode: str = "queue",
         tls_ids: Optional[List[str]] = None,
+        seed: Optional[int] = None,
     ):
         self.base_dir = Path(__file__).resolve().parent
         self.sumo_data_dir = self.base_dir / "sumo_data"
-        self.sumo_cfg = (
-            Path(sumo_cfg) if sumo_cfg else self.sumo_data_dir / "single.sumocfg"
-        )
+        if sumo_cfg:
+            self.sumo_cfg = Path(sumo_cfg).resolve()
+            if not self.sumo_cfg.exists():
+                raise FileNotFoundError(
+                    f"SUMO 설정 파일을 찾을 수 없습니다: {self.sumo_cfg}"
+                )
+        else:
+            self.sumo_cfg = self.sumo_data_dir / "single.sumocfg"
         self._maybe_build_network()
 
         self.use_gui = use_gui
@@ -64,6 +72,7 @@ class SumoParallelEnv(ParallelEnv):
         self.min_green = int(min_green)
         self.max_steps = int(max_steps)
         self.reward_mode = reward_mode
+        self._default_seed = seed
 
         # SUMO TLS id → PettingZoo agent id 매핑
         self._tls_ids: List[str] = tls_ids if tls_ids is not None else ["C"]
@@ -133,19 +142,30 @@ class SumoParallelEnv(ParallelEnv):
             raise FileNotFoundError(
                 "single_intersection.net.xml이 없고 netconvert도 찾을 수 없습니다."
             )
-        cmd = [
-            netconvert,
-            "--node-files", str(self.sumo_data_dir / "nodes.nod.xml"),
-            "--edge-files", str(self.sumo_data_dir / "edges.edg.xml"),
-            "--connection-files", str(self.sumo_data_dir / "connections.con.xml"),
-            "--tllogic-files", str(self.sumo_data_dir / "tls.tll.xml"),
-            "-o", str(net_file),
-        ]
-        result = subprocess.run(cmd, capture_output=True, text=True)
-        if result.returncode != 0:
-            raise RuntimeError(
-                f"netconvert 네트워크 생성 실패.\n{result.stderr}"
-            )
+        with tempfile.NamedTemporaryFile(
+            suffix=".net.xml",
+            dir=self.sumo_data_dir,
+            delete=False,
+        ) as tmp:
+            tmp_path = tmp.name
+        try:
+            cmd = [
+                netconvert,
+                "--node-files", str(self.sumo_data_dir / "nodes.nod.xml"),
+                "--edge-files", str(self.sumo_data_dir / "edges.edg.xml"),
+                "--connection-files", str(self.sumo_data_dir / "connections.con.xml"),
+                "--tllogic-files", str(self.sumo_data_dir / "tls.tll.xml"),
+                "-o", tmp_path,
+            ]
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            if result.returncode != 0:
+                raise RuntimeError(
+                    f"netconvert 네트워크 생성 실패.\n{result.stderr}"
+                )
+            os.replace(tmp_path, net_file)
+        except Exception:
+            Path(tmp_path).unlink(missing_ok=True)
+            raise
 
     def _sumo_binary(self) -> str:
         preferred = "sumo-gui" if self.use_gui else "sumo"
@@ -170,6 +190,19 @@ class SumoParallelEnv(ParallelEnv):
         ]
         traci.start(cmd, label=self._conn_label)
         self.conn = traci.getConnection(self._conn_label)
+
+        known_tls = set(self.conn.trafficlight.getIDList())
+        missing_tls = [tls_id for tls_id in self._tls_ids if tls_id not in known_tls]
+        if missing_tls:
+            try:
+                self.conn.close()
+            except Exception:
+                pass
+            self.conn = None
+            raise ValueError(
+                "SUMO 네트워크에 존재하지 않는 TLS ID: "
+                f"{missing_tls}. 사용 가능한 TLS: {sorted(known_tls)}"
+            )
 
         for agent in self.possible_agents:
             tls_id = self._agent_to_tls[agent]
@@ -245,7 +278,7 @@ class SumoParallelEnv(ParallelEnv):
         options: Optional[dict] = None,
     ):
         self.agents = list(self.possible_agents)
-        self._start_sumo(seed=seed)
+        self._start_sumo(seed=self._default_seed if seed is None else seed)
 
         self.sim_step = 0
         self._depart_time.clear()

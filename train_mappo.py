@@ -7,10 +7,12 @@ Ray RLlib MAPPO — SUMO 교차로 신호제어 학습
 import argparse
 import math
 import re
+import random
 from pathlib import Path
 
 import numpy as np
 import ray
+import torch
 from torch.utils.tensorboard import SummaryWriter
 from gymnasium import spaces
 from ray.rllib.algorithms.ppo import PPOConfig
@@ -60,6 +62,8 @@ def parse_args():
     p.add_argument("--delta-time", type=int, default=5)
     p.add_argument("--min-green", type=int, default=10)
     p.add_argument("--yellow-time", type=int, default=2)
+    p.add_argument("--seed", type=int, default=42,
+                   help="전역 랜덤 시드 (재현성)")
     # 다중 교차로 확장 시: --tls-ids C D E ...
     p.add_argument("--tls-ids", nargs="+", default=["C"],
                    help="SUMO 네트워크 내 TLS id 목록 (단일: C)")
@@ -68,6 +72,10 @@ def parse_args():
 
 def main():
     args = parse_args()
+
+    random.seed(args.seed)
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
 
     register_env("sumo_pz", _make_env)
     ray.init(ignore_reinit_error=True)
@@ -79,6 +87,7 @@ def main():
         "yellow_time": args.yellow_time,
         "max_steps": args.max_steps,
         "tls_ids": args.tls_ids,
+        "seed": args.seed,
     }
 
     # shared policy 스펙 정의 (obs/act space는 모든 에이전트 동일)
