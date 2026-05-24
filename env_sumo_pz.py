@@ -275,6 +275,7 @@ class SumoParallelEnv(ParallelEnv):
         }
 
         done = False
+        throughput_before = self._throughput  # 스텝 시작 시점 처리량 스냅샷
 
         # 전환 에이전트의 TLS에 yellow 적용
         for agent in self.agents:
@@ -310,11 +311,16 @@ class SumoParallelEnv(ParallelEnv):
             float(np.mean(self._completed_travel)) if self._completed_travel else 0.0
         )
 
+        # 이번 스텝에서 완료된 차량 수 (delta): _simulate_seconds 내부에서 누적됨
+        step_throughput = self._throughput - throughput_before
+
         observations, rewards, terminations, truncations, infos = {}, {}, {}, {}, {}
         for agent in self.agents:
             obs = self._compute_obs(agent)
             observations[agent] = obs
-            rewards[agent] = -float(np.sum(obs[:4]))  # -total_queue
+            queue_penalty = float(np.sum(obs[:4])) / 10.0
+            throughput_bonus = step_throughput * 0.5
+            rewards[agent] = -queue_penalty + throughput_bonus
             terminations[agent] = False
             truncations[agent] = done
             infos[agent] = {

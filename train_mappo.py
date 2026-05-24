@@ -109,8 +109,9 @@ def main():
             minibatch_size=128,   # Ray 2.10+: sgd_minibatch_size → minibatch_size
             lambda_=0.95,         # GAE λ
             clip_param=0.2,       # PPO clip ε
-            vf_loss_coeff=0.5,
+            vf_loss_coeff=1.0,    # 보상 스케일 다운 후 VF loss 가중치 높임
             entropy_coeff=0.01,
+            vf_clip_param=100.0,  # 기본값 10.0이 reward scale(-35000)과 충돌해 VF가 학습 안됨
         )
     )
 
