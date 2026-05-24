@@ -1,7 +1,7 @@
-# GreenWave — SUMO 교차로 신호제어 강화학습
+# GreenWave — SUMO 교차로 신호제어 강화학습 (MAPPO)
 
-단일 교차로에서 DQN(SB3)과 MAPPO(RLlib)를 실험하고,
-다중 교차로 MAPPO로 확장할 수 있는 실습 프레임워크.
+RLlib MAPPO(Multi-Agent PPO)로 SUMO 단일·다중 교차로 신호를 제어하는 실습 프레임워크.  
+단일 교차로(`tls_ids=["C"]`)에서 시작해 `--tls-ids` 인자 하나로 다중 교차로로 확장됩니다.
 
 ---
 
@@ -49,97 +49,69 @@ python -c "import ray, pettingzoo; print('RLlib OK')"
 
 ```
 GreenWave/
-├── env_sumo_single.py   # Gymnasium Env — SB3 DQN용 단일 에이전트 환경
-├── env_sumo_pz.py       # PettingZoo ParallelEnv — RLlib MAPPO용 멀티에이전트 환경
-├── train_dqn.py         # SB3 DQN 학습
-├── train_mappo.py       # RLlib MAPPO 학습 (다중 교차로 확장 가능)
-├── evaluate.py          # DQN vs Fixed-time 성능 비교 → CSV
-├── record_video.py      # DQN 정책 롤아웃 영상 저장
-├── sumo_data/           # SUMO 네트워크 XML 파일
+├── env_sumo_pz.py          # PettingZoo ParallelEnv — MAPPO 멀티에이전트 환경
+├── train_mappo.py          # RLlib MAPPO 학습 (단일/다중 교차로)
+├── evaluate_mappo.py       # MAPPO vs Fixed-time 성능 비교 → CSV
+├── record_video_mappo.py   # MAPPO 정책 롤아웃 영상 저장
+├── sumo_data/              # SUMO 네트워크 XML 파일
 │   ├── nodes.nod.xml
 │   ├── edges.edg.xml
 │   ├── connections.con.xml
 │   ├── tls.tll.xml
 │   ├── routes.rou.xml
 │   └── single.sumocfg
-├── models/              # 저장된 모델 (DQN .zip, MAPPO 디렉터리)
-├── results/             # 평가 CSV, TensorBoard 로그
-│   ├── eval_metrics.csv
-│   ├── tb_dqn/
-│   └── tb_mappo/
-└── videos/              # 롤아웃 영상 (mp4)
+│   # single_intersection.net.xml — 런타임에 netconvert로 자동 생성 (gitignored)
+├── models/                 # 학습 체크포인트 (gitignored)
+├── results/                # 평가 CSV, TensorBoard 로그 (gitignored)
+├── videos/                 # 롤아웃 영상 mp4 (gitignored)
+└── samples/                # 커밋된 참조용 샘플 산출물 (README 참조)
 ```
 
 ---
 
-## 환경 설계
+## 환경 설계 (`env_sumo_pz.py`)
 
-### 행동 · 관측 · 보상 (공통)
+### 행동 · 관측 · 보상
 
 | 항목 | 내용 |
 |------|------|
 | 행동 `Discrete(4)` | 0=North / 1=South / 2=East / 3=West 단독 green |
 | 관측 `shape=(10,)` | `[queue×4, speed×4, phase_norm, elapsed_norm]` |
-| 보상 | `−total_queue_length` (진입 차선 대기 차량 합) |
+| 보상 | `−total_queue_length` (담당 교차로 진입 차선 대기 차량 합) |
 | 제약 | phase 변경 시 yellow 삽입, minimum green time 적용 |
-
-### 두 환경 클래스 비교
-
-| | `env_sumo_single.py` | `env_sumo_pz.py` |
-|---|---|---|
-| 기반 | `gymnasium.Env` | `pettingzoo.ParallelEnv` |
-| 에이전트 | 단일 | `tl_0`, `tl_1`, ... |
-| 알고리즘 | SB3 DQN | RLlib MAPPO |
-| 다중 교차로 | ✗ | ✅ `tls_ids` 인자 추가 |
 
 ### 시스템 구조도
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│  DQN (SB3)                    MAPPO (RLlib)                 │
-│                                                              │
-│  SB3 DQN Agent                RLlib PPO (shared policy)     │
-│       ↓ action (Discrete 4)        ↓ {agent: action}        │
-│  SumoSingleIntersectionEnv    SumoParallelEnv (PettingZoo)  │
-│       ↓ TraCI                      ↓ TraCI                  │
-│       └──────── SUMO Simulator ────┘                        │
-│                      ↑                                       │
-│               sumo_data/ XML                                 │
-└─────────────────────────────────────────────────────────────┘
+RLlib PPO (shared policy)
+        ↓ {agent_id: action}
+SumoParallelEnv (PettingZoo ParallelEnv)
+        ↓ TraCI
+   SUMO Simulator
+        ↑
+ sumo_data/ XML
 ```
+
+에이전트 매핑: `tl_0 → TLS "C"`, `tl_1 → TLS "D"`, ...  
+모든 에이전트가 하나의 shared policy를 공유 → 다중 교차로로 자연스럽게 확장.
 
 ---
 
 ## 실행 순서
 
-### DQN (SB3 / 단일 에이전트)
-
-```bash
-# 1. 학습 (모델: models/dqn_sumo_single.zip)
-python train_dqn.py --timesteps 120000
-
-# 2. DQN vs Fixed-time 비교 평가 (결과: results/eval_metrics.csv)
-python evaluate.py --model models/dqn_sumo_single.zip --episodes 5
-
-# 3. 롤아웃 영상 저장 (결과: videos/dqn_policy_rollout.mp4)
-python record_video.py --model models/dqn_sumo_single.zip
-```
-
-### MAPPO (RLlib / 멀티에이전트)
-
-저장 경로는 `models/MAPPO_sumo_N` 형식으로 자동 버전 생성됩니다.
+### 1. 학습
 
 ```bash
 # 빠른 테스트 (20 iter ≈ 80k steps, ~5분)
 python train_mappo.py --num-iters 20 --num-workers 0
 
-# 본 학습 (DQN 300k 스텝 수준 비교)
-python train_mappo.py --num-iters 100 --num-workers 1
+# 본 학습 (200 iter)
+python train_mappo.py --num-iters 200 --num-workers 1
 
 # 저장 경로 직접 지정
-python train_mappo.py --num-iters 100 --out models/MAPPO_sumo_exp1
+python train_mappo.py --num-iters 200 --out models/MAPPO_sumo_exp1
 
-# 다중 교차로 확장 (추후)
+# 다중 교차로 확장
 python train_mappo.py --tls-ids C D E --num-workers 3
 ```
 
@@ -149,7 +121,7 @@ python train_mappo.py --tls-ids C D E --num-workers 3
 |------|--------|------|
 | `--num-iters` | 200 | 학습 반복 횟수 (1 iter = 4000 스텝 수집 후 10 epoch 업데이트) |
 | `--num-workers` | 1 | Ray env runner 수 (0=driver 직접 수행, 디버깅 권장) |
-| `--out` | 자동 | 체크포인트 저장 경로 |
+| `--out` | 자동 | 체크포인트 저장 경로 (`models/MAPPO_sumo_N` 자동 버전) |
 | `--checkpoint-freq` | 20 | 중간 체크포인트 주기 (iter 단위) |
 | `--tls-ids` | `["C"]` | SUMO TLS id 목록 (다중 교차로 확장 시 추가) |
 
@@ -161,13 +133,18 @@ train_batch_size=4000 × num_iters = 총 env steps
 iter 1회 ≈ 5~6 에피소드
 ```
 
-**체크포인트 복원**
+### 2. 평가
 
-```python
-from ray.rllib.algorithms.ppo import PPO
-algo = PPO.from_checkpoint("models/MAPPO_sumo_1")
-obs, _ = env.reset()
-action = algo.compute_single_action(obs, policy_id="shared_policy")
+```bash
+# MAPPO vs Fixed-time 비교 (결과: results/eval_metrics_mappo.csv)
+python evaluate_mappo.py --model models/MAPPO_sumo_1 --episodes 5
+```
+
+### 3. 롤아웃 영상 저장
+
+```bash
+# 영상 저장 (결과: videos/mappo_policy_rollout.mp4)
+python record_video_mappo.py --model models/MAPPO_sumo_1
 ```
 
 ---
@@ -177,20 +154,17 @@ action = algo.compute_single_action(obs, policy_id="shared_policy")
 학습 중 또는 학습 후 별도 터미널에서 실행 후 `http://localhost:6006` 접속.
 
 ```bash
-# DQN + MAPPO 동시 비교
-tensorboard --logdir results/
-
-# MAPPO만
 tensorboard --logdir results/tb_mappo
-
-# DQN만
-tensorboard --logdir results/tb_dqn
 ```
 
-| 알고리즘 | 로그 경로 | 주요 지표 |
-|----------|-----------|-----------|
-| DQN | `results/tb_dqn/` | `rollout/ep_rew_mean`, `train/loss` |
-| MAPPO | `results/tb_mappo/MAPPO_sumo_N/` | `reward/mean`, `loss/total`, `loss/policy`, `loss/value`, `loss/entropy` |
+| 지표 | 설명 |
+|------|------|
+| `reward/mean` | 에피소드 평균 누적 보상 |
+| `episode/len_mean` | 평균 에피소드 길이 (steps) |
+| `loss/total` | 전체 손실 |
+| `loss/policy` | 정책 손실 |
+| `loss/value` | 가치함수 손실 |
+| `loss/entropy` | 엔트로피 보너스 |
 
 ---
 
@@ -205,10 +179,22 @@ tensorboard --logdir results/tb_dqn
 
 ---
 
+## 체크포인트 복원
+
+```python
+from ray.rllib.algorithms.ppo import PPO
+algo = PPO.from_checkpoint("models/MAPPO_sumo_1")
+obs, _ = env.reset()
+action = algo.compute_single_action(obs, policy_id="shared_policy")
+```
+
+---
+
 ## 참고
 
-- SUMO 네트워크 파일(`single_intersection.net.xml`)이 없으면 `netconvert`로 자동 생성
-- SB3 모델은 `.zip` 아카이브, RLlib 체크포인트는 디렉터리 형식으로 저장
-- `--num-workers 0`: driver process에서 직접 롤아웃 (디버깅 용이, 단일 SUMO 인스턴스)
+- `sumo_data/single_intersection.net.xml` 이 없으면 첫 실행 시 `netconvert`로 자동 생성
+- RLlib 체크포인트는 디렉터리 형식으로 저장 (`models/MAPPO_sumo_N/`)
+- `--num-workers 0`: driver process에서 직접 롤아웃 (디버깅 용이, SUMO 1개)
 - `--num-workers N≥1`: 별도 worker process로 SUMO N개 병렬 실행 (학습 속도 향상)
 - SUMO 시뮬레이션은 CPU 전용 / RLlib(PyTorch)은 CPU 학습 (M4 Mac MPS 미지원)
+- 주요 산출물(`models/`, `results/`, `videos/`)은 gitignored — 참조용 샘플은 `samples/` 참조

@@ -368,15 +368,17 @@ class SumoParallelEnv(ParallelEnv):
 
 if __name__ == "__main__":
     env = SumoParallelEnv()
-    obs, infos = env.reset(seed=42)
-    print("agents:", env.agents)
-    print("obs shapes:", {a: o.shape for a, o in obs.items()})
-
+    info: dict = {}
     step = 0
-    while env.agents:
-        actions = {a: env.action_space(a).sample() for a in env.agents}
-        obs, rew, term, trunc, info = env.step(actions)
-        step += 1
+    try:
+        obs, infos = env.reset(seed=42)
+        print("agents:", env.agents)
+        print("obs shapes:", {a: o.shape for a, o in obs.items()})
 
-    env.close()
+        while env.agents:
+            actions = {a: env.action_space(a).sample() for a in env.agents}
+            obs, rew, term, trunc, info = env.step(actions)
+            step += 1
+    finally:
+        env.close()
     print(f"done after {step} steps | info: {info}")
