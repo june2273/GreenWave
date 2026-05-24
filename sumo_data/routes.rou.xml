@@ -1,0 +1,27 @@
+<routes>
+    <vType id="car" accel="2.6" decel="4.5" sigma="0.5" length="5.0" maxSpeed="13.89"/>
+
+    <route id="N_straight" edges="n2c c2s"/>
+    <route id="N_left" edges="n2c c2e"/>
+
+    <route id="S_straight" edges="s2c c2n"/>
+    <route id="S_left" edges="s2c c2w"/>
+
+    <route id="E_straight" edges="e2c c2w"/>
+    <route id="E_left" edges="e2c c2s"/>
+
+    <route id="W_straight" edges="w2c c2e"/>
+    <route id="W_left" edges="w2c c2n"/>
+
+    <flow id="f_ns" type="car" route="N_straight" begin="0" end="3600" vehsPerHour="450"/>
+    <flow id="f_nl" type="car" route="N_left" begin="0" end="3600" vehsPerHour="200"/>
+
+    <flow id="f_ss" type="car" route="S_straight" begin="0" end="3600" vehsPerHour="450"/>
+    <flow id="f_sl" type="car" route="S_left" begin="0" end="3600" vehsPerHour="200"/>
+
+    <flow id="f_es" type="car" route="E_straight" begin="0" end="3600" vehsPerHour="450"/>
+    <flow id="f_el" type="car" route="E_left" begin="0" end="3600" vehsPerHour="200"/>
+
+    <flow id="f_ws" type="car" route="W_straight" begin="0" end="3600" vehsPerHour="450"/>
+    <flow id="f_wl" type="car" route="W_left" begin="0" end="3600" vehsPerHour="200"/>
+</routes>

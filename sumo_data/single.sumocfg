@@ -1,0 +1,16 @@
+<configuration>
+    <input>
+        <net-file value="single_intersection.net.xml"/>
+        <route-files value="routes.rou.xml"/>
+    </input>
+
+    <time>
+        <begin value="0"/>
+        <end value="3600"/>
+        <step-length value="1"/>
+    </time>
+
+    <processing>
+        <time-to-teleport value="-1"/>
+    </processing>
+</configuration>

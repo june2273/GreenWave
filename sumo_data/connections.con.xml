@@ -1,0 +1,17 @@
+<connections>
+    <!-- North in: straight + left -->
+    <connection from="n2c" to="c2s" fromLane="0" toLane="0" tl="C" linkIndex="0"/>
+    <connection from="n2c" to="c2e" fromLane="0" toLane="0" tl="C" linkIndex="1"/>
+
+    <!-- South in: straight + left -->
+    <connection from="s2c" to="c2n" fromLane="0" toLane="0" tl="C" linkIndex="2"/>
+    <connection from="s2c" to="c2w" fromLane="0" toLane="0" tl="C" linkIndex="3"/>
+
+    <!-- East in: straight + left -->
+    <connection from="e2c" to="c2w" fromLane="0" toLane="0" tl="C" linkIndex="4"/>
+    <connection from="e2c" to="c2s" fromLane="0" toLane="0" tl="C" linkIndex="5"/>
+
+    <!-- West in: straight + left -->
+    <connection from="w2c" to="c2e" fromLane="0" toLane="0" tl="C" linkIndex="6"/>
+    <connection from="w2c" to="c2n" fromLane="0" toLane="0" tl="C" linkIndex="7"/>
+</connections>
