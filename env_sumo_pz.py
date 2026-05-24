@@ -29,8 +29,11 @@ class SumoParallelEnv(ParallelEnv):
     다중 교차로: tls_ids=["C","D",...] → agents=["tl_0","tl_1",...]
 
     행동(Discrete 4): 0=North / 1=South / 2=East / 3=West 단독 green
-    관측(shape 10): [queue×4, speed×4, phase_norm, elapsed_norm]
-    보상: -(queue_length / 10) + (step_arrivals × 0.5)  — 대기열 패널티 + 처리량 보너스
+    관측(shape 10): [queue×4, speed×4, phase_norm, elapsed_norm]  (동적 lane 감지, 최대 4 lane)
+    보상(reward_mode 선택):
+      "queue"            : -(mean(queues)+max(queues))/10 + throughput×0.5  — 기아 방향 추가 패널티
+      "diff-waiting-time": -(누적대기 변화량)/100  — 대기 감소 시 양의 보상 (SUMO-RL 방식)
+      "pressure"         : out_vehicles - in_vehicles  — 처리량 직접 최대화
     """
 
     metadata = {
@@ -39,8 +42,11 @@ class SumoParallelEnv(ParallelEnv):
         "name": "sumo_intersection_v0",
     }
 
-    # 단일 교차로 기준 진입 edge (다중 교차로 확장 시 tls별 per-agent 설정으로 교체)
-    _DEFAULT_INCOMING_EDGES: List[str] = ["n2c", "s2c", "e2c", "w2c"]
+    # 보상 모드 선택지
+    # "queue"            : -(mean(queues) + max(queues)) / 10  — 기아 방향 추가 패널티
+    # "diff-waiting-time": 누적 대기시간 변화량 (SUMO-RL 검증 방식)
+    # "pressure"         : 출력 lane 차량 수 - 입력 lane 차량 수 (처리량 직접 최대화)
+    REWARD_MODES: List[str] = ["queue", "diff-waiting-time", "pressure"]
 
     def __init__(
         self,
@@ -61,9 +67,17 @@ class SumoParallelEnv(ParallelEnv):
                 raise FileNotFoundError(
                     f"SUMO 설정 파일을 찾을 수 없습니다: {self.sumo_cfg}"
                 )
+            # 외부 네트워크 사용 시 GreenWave 기본 net 자동생성 불필요
         else:
             self.sumo_cfg = self.sumo_data_dir / "single.sumocfg"
-        self._maybe_build_network()
+            # 기본 단일교차로 net.xml이 없을 때만 netconvert로 자동 생성
+            self._maybe_build_network()
+
+        if reward_mode not in self.REWARD_MODES:
+            raise ValueError(
+                f"지원하지 않는 reward_mode: '{reward_mode}'. "
+                f"선택 가능: {self.REWARD_MODES}"
+            )
 
         self.use_gui = use_gui
         self.delta_time = int(delta_time)
@@ -81,10 +95,13 @@ class SumoParallelEnv(ParallelEnv):
             zip(self.possible_agents, self._tls_ids)
         )
 
-        # 단일 교차로 기준 lane ids (확장 시 per-agent로 분리)
-        self._lane_ids: List[str] = [
-            f"{e}_0" for e in self._DEFAULT_INCOMING_EDGES
-        ]
+        # 동적 lane id 테이블 (reset 시 _start_sumo() 에서 getControlledLanes() 로 채워짐)
+        # _per_agent_lanes  : agent별 입력 lane id 목록 (관측·보상 계산)
+        # _per_agent_out_lanes: agent별 출력 lane id 목록 (pressure 보상 전용)
+        # _lane_ids         : 전체 에이전트 입력 lane 합집합 (queue_cumsum 집계)
+        self._per_agent_lanes: Dict[str, List[str]] = {}
+        self._per_agent_out_lanes: Dict[str, List[str]] = {}
+        self._lane_ids: List[str] = []
 
         # agents: 현재 에피소드에서 활성 에이전트 (reset 시 복원, done 시 빈 리스트)
         self.agents: List[str] = []
@@ -109,6 +126,9 @@ class SumoParallelEnv(ParallelEnv):
         self._completed_travel: List[float] = []
         self._throughput: int = 0
         self._queue_cumsum: float = 0.0
+
+        # diff-waiting-time 보상 모드 전용: 직전 스텝의 agent별 누적 대기시간 합
+        self._last_wait_measure: Dict[str, float] = {}
 
     # ------------------------------------------------------------------
     # PettingZoo 필수 인터페이스
@@ -198,6 +218,28 @@ class SumoParallelEnv(ParallelEnv):
                 f"사용 가능한 TLS: {sorted(known_tls)}"
             )
 
+        # 동적 lane 감지 (SUMO-RL 패턴): 네트워크 위상에서 직접 읽어
+        # 하드코딩 없이 임의 SUMO 네트워크(2x2 그리드 등)에서도 동작
+        self._per_agent_lanes = {}
+        self._per_agent_out_lanes = {}
+        for agent in self.possible_agents:
+            tls_id = self._agent_to_tls[agent]
+            # 입력 lane: TLS가 제어하는 모든 lane (중복 제거, 순서 보존)
+            self._per_agent_lanes[agent] = list(dict.fromkeys(
+                self.conn.trafficlight.getControlledLanes(tls_id)
+            ))
+            # 출력 lane: TLS 연결에서 목적지 lane 추출 (pressure 보상 전용)
+            self._per_agent_out_lanes[agent] = list(set(
+                link[0][1]
+                for link in self.conn.trafficlight.getControlledLinks(tls_id)
+                if link
+            ))
+        # 전체 입력 lane 합집합 (queue_cumsum 집계용, 에이전트 간 중복 제거)
+        self._lane_ids = list(dict.fromkeys(
+            ln for agent in self.possible_agents
+            for ln in self._per_agent_lanes[agent]
+        ))
+
         for agent in self.possible_agents:
             tls_id = self._agent_to_tls[agent]
             self._yellow_phase_index[agent] = self._find_yellow_phase_index(tls_id)
@@ -248,14 +290,14 @@ class SumoParallelEnv(ParallelEnv):
         return False, num_seconds
 
     def _compute_obs(self, agent: str) -> np.ndarray:
-        queues = [
-            float(self.conn.lane.getLastStepHaltingNumber(ln))
-            for ln in self._lane_ids
-        ]
-        speeds = [
-            max(0.0, float(self.conn.lane.getLastStepMeanSpeed(ln)))
-            for ln in self._lane_ids
-        ]
+        # agent별 입력 lane 최대 4개 사용 (shape=10 고정 유지)
+        # 4x4 격자처럼 lane이 4개 이상인 경우 앞 4개만, 미만이면 0으로 패딩
+        lanes = self._per_agent_lanes.get(agent, self._lane_ids)[:4]
+        queues = [float(self.conn.lane.getLastStepHaltingNumber(ln)) for ln in lanes]
+        speeds = [max(0.0, float(self.conn.lane.getLastStepMeanSpeed(ln))) for ln in lanes]
+        # 4 lane 미만인 경우 0 패딩
+        queues += [0.0] * (4 - len(queues))
+        speeds += [0.0] * (4 - len(speeds))
         phase_norm = self._current_phase[agent] / 3.0
         elapsed_norm = self._elapsed_phase_time[agent] / max(1.0, float(self.min_green))
         obs = np.array(queues + speeds + [phase_norm, elapsed_norm], dtype=np.float32)
@@ -281,6 +323,7 @@ class SumoParallelEnv(ParallelEnv):
         self._completed_travel.clear()
         self._throughput = 0
         self._queue_cumsum = 0.0
+        self._last_wait_measure.clear()
 
         for agent in self.agents:
             self._current_phase[agent] = 0
@@ -345,9 +388,34 @@ class SumoParallelEnv(ParallelEnv):
         for agent in self.agents:
             obs = self._compute_obs(agent)
             observations[agent] = obs
-            queue_penalty = float(np.sum(obs[:4])) / 10.0
-            throughput_bonus = step_throughput * 0.5
-            rewards[agent] = -queue_penalty + throughput_bonus
+
+            # ── 보상 함수 (reward_mode 별 분기) ──────────────────────────────
+            if self.reward_mode == "diff-waiting-time":
+                # 누적 대기시간 변화량: 감소 시 양의 보상 (SUMO-RL 검증 방식)
+                lanes = self._per_agent_lanes.get(agent, self._lane_ids)
+                current_wait = sum(
+                    self.conn.lane.getWaitingTime(ln) for ln in lanes
+                ) / 100.0
+                reward = self._last_wait_measure.get(agent, current_wait) - current_wait
+                self._last_wait_measure[agent] = current_wait
+
+            elif self.reward_mode == "pressure":
+                # 처리량 압력: 출력 lane 차량 수 - 입력 lane 차량 수
+                in_lanes  = self._per_agent_lanes.get(agent, self._lane_ids)
+                out_lanes = self._per_agent_out_lanes.get(agent, [])
+                reward = float(
+                    sum(self.conn.lane.getLastStepVehicleNumber(ln) for ln in out_lanes)
+                    - sum(self.conn.lane.getLastStepVehicleNumber(ln) for ln in in_lanes)
+                )
+
+            else:  # "queue" (default)
+                # mean+max 조합: 기아 방향에 추가 패널티 + 처리량 보너스
+                queue_arr = obs[:4]
+                queue_penalty = (float(np.mean(queue_arr)) + float(np.max(queue_arr))) / 10.0
+                throughput_bonus = step_throughput * 0.5
+                reward = -queue_penalty + throughput_bonus
+
+            rewards[agent] = reward
             terminations[agent] = False
             truncations[agent] = done
             infos[agent] = {

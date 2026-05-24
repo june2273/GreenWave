@@ -53,6 +53,11 @@ def parse_args():
     p.add_argument("--yellow-time", type=int, default=2)
     p.add_argument("--tls-ids", nargs="+", default=["C"],
                    help="학습 시 사용한 TLS id 목록 (train_mappo.py와 일치해야 함)")
+    p.add_argument("--reward-mode", type=str, default="queue",
+                   choices=["queue", "diff-waiting-time", "pressure"],
+                   help="학습 시 사용한 보상 모드 (train_mappo.py와 일치해야 함)")
+    p.add_argument("--sumo-cfg", type=str, default=None,
+                   help="SUMO 설정 파일 경로 (학습 시와 동일하게 지정)")
     return p.parse_args()
 
 
@@ -64,14 +69,18 @@ def main():
     algo = PPO.from_checkpoint(str(Path(args.model).resolve()))
     module = algo.get_module("shared_policy")
 
-    env = SumoParallelEnv(
+    env_kwargs = dict(
         use_gui=False,
         delta_time=args.delta_time,
         min_green=args.min_green,
         yellow_time=args.yellow_time,
         max_steps=args.max_steps,
         tls_ids=args.tls_ids,
+        reward_mode=args.reward_mode,
     )
+    if args.sumo_cfg:
+        env_kwargs["sumo_cfg"] = args.sumo_cfg
+    env = SumoParallelEnv(**env_kwargs)
 
     try:
         obs_dict, _ = env.reset(seed=args.seed)

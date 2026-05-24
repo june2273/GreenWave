@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SUMO 설정 파일 — SUMO-RL 2x2 격자 교차로 네트워크
+  네트워크 파일: /Users/june2_07/PycharmProjects/sumo-rl-1.4.5/sumo_rl/nets/2x2grid/
+  TLS ID: "1", "2", "5", "6"  (4개 교차로)
+  사용법:
+    python train_mappo.py --tls-ids 1 2 5 6 --sumo-cfg sumo_data/2x2grid.sumocfg
+-->
+<configuration xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+               xsi:noNamespaceSchemaLocation="http://sumo.dlr.de/xsd/sumoConfiguration.xsd">
+  <input>
+    <net-file value="/Users/june2_07/PycharmProjects/sumo-rl-1.4.5/sumo_rl/nets/2x2grid/2x2.net.xml"/>
+    <route-files value="/Users/june2_07/PycharmProjects/sumo-rl-1.4.5/sumo_rl/nets/2x2grid/2x2.rou.xml"/>
+  </input>
+  <time>
+    <begin value="0"/>
+    <end value="3600"/>
+  </time>
+</configuration>

@@ -64,9 +64,15 @@ def parse_args():
     p.add_argument("--yellow-time", type=int, default=2)
     # 다중 교차로 확장 시: --tls-ids C D E ...
     p.add_argument("--tls-ids", nargs="+", default=["C"],
-                   help="SUMO 네트워크 내 TLS id 목록 (단일: C)")
+                   help="SUMO 네트워크 내 TLS id 목록 (단일: C, 2x2: 1 2 5 6)")
     p.add_argument("--seed", type=int, default=42,
                    help="전역 랜덤 시드 (random/numpy/torch/SUMO 일괄 설정)")
+    p.add_argument("--reward-mode", type=str, default="queue",
+                   choices=["queue", "diff-waiting-time", "pressure"],
+                   help="보상 함수 모드 (queue: mean+max 패널티, "
+                        "diff-waiting-time: 대기시간 변화량, pressure: 처리량 차이)")
+    p.add_argument("--sumo-cfg", type=str, default=None,
+                   help="SUMO 설정 파일 경로 (미지정 시 기본 단일교차로 사용)")
     return p.parse_args()
 
 
@@ -88,7 +94,10 @@ def main():
         "yellow_time": args.yellow_time,
         "max_steps": args.max_steps,
         "tls_ids": args.tls_ids,
+        "reward_mode": args.reward_mode,
     }
+    if args.sumo_cfg:
+        env_config["sumo_cfg"] = args.sumo_cfg
 
     # shared policy 스펙 정의 (obs/act space는 모든 에이전트 동일)
     obs_space = spaces.Box(
@@ -111,16 +120,16 @@ def main():
             policy_mapping_fn=lambda agent_id, episode, **kwargs: "shared_policy",
         )
         .training(
-            lr=3e-4,
+            lr=1e-4,              # 3e-4 → 1e-4: policy 진동 억제 (loss/policy ±0.07 → ±0.03)
             gamma=0.99,
             train_batch_size=4000,
-            num_epochs=10,        # Ray 2.10+: num_sgd_iter → num_epochs
+            num_epochs=6,         # 10 → 6: 배치당 업데이트 횟수 축소, overshoot 방지
             minibatch_size=128,   # Ray 2.10+: sgd_minibatch_size → minibatch_size
             lambda_=0.95,         # GAE λ
             clip_param=0.2,       # PPO clip ε
-            vf_loss_coeff=1.0,    # 보상 스케일 다운 후 VF loss 가중치 높임
-            entropy_coeff=0.01,
-            vf_clip_param=500.0,  # reward scale 조정 후 discounted return 범위 -300~-500, 여유 있게 설정
+            vf_loss_coeff=0.5,    # 1.0 → 0.5: VF 급학습 시 advantage 급변 완화
+            entropy_coeff=0.02,   # 0.01 → 0.02: 조기 수렴 방지, 탐색 유지
+            vf_clip_param=500.0,  # discounted return 범위 -300~-500, 여유 있게 설정
         )
     )
 
@@ -132,7 +141,7 @@ def main():
     run_name = Path(out_path).name
     tb_writer = SummaryWriter(log_dir=f"results/tb_mappo/{run_name}")
     print(f"학습 시작 | iters={args.num_iters} | workers={args.num_workers} "
-          f"| tls={args.tls_ids} | seed={args.seed} | out={out_path}")
+          f"| tls={args.tls_ids} | reward={args.reward_mode} | seed={args.seed} | out={out_path}")
     print(f"TensorBoard: tensorboard --logdir results/tb_mappo")
 
     try:

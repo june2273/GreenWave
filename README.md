@@ -1,7 +1,7 @@
 # GreenWave — SUMO 교차로 신호제어 강화학습 (MAPPO)
 
 RLlib MAPPO(Multi-Agent PPO)로 SUMO 단일·다중 교차로 신호를 제어하는 실습 프레임워크.  
-단일 교차로(`tls_ids=["C"]`)에서 시작해 `--tls-ids` 인자 하나로 다중 교차로로 확장됩니다.
+단일 교차로(`tls_ids=["C"]`)에서 시작해 `--tls-ids` + `--sumo-cfg` 인자로 임의 SUMO 네트워크(2×2 격자 등)로 확장됩니다.
 
 ---
 
@@ -59,8 +59,9 @@ GreenWave/
 │   ├── connections.con.xml
 │   ├── tls.tll.xml
 │   ├── routes.rou.xml
-│   └── single.sumocfg
-│   # single_intersection.net.xml — 런타임에 netconvert로 자동 생성 (gitignored)
+│   ├── single.sumocfg      # 기본 단일교차로 설정
+│   └── 2x2grid.sumocfg     # SUMO-RL 2x2 격자 교차로 설정 (TLS: "1","2","5","6")
+│   # single_intersection.net.xml — 첫 실행 시 netconvert로 자동 생성 (gitignored)
 ├── models/                 # 학습 체크포인트 (gitignored)
 ├── results/                # 평가 CSV, TensorBoard 로그 (gitignored)
 ├── videos/                 # 롤아웃 영상 mp4 (gitignored)
@@ -76,8 +77,10 @@ GreenWave/
 | 항목 | 내용 |
 |------|------|
 | 행동 `Discrete(4)` | 0=North / 1=South / 2=East / 3=West 단독 green |
-| 관측 `shape=(10,)` | `[queue×4, speed×4, phase_norm, elapsed_norm]` |
-| 보상 | `−(queue_length / 10) + (step_arrivals × 0.5)` — 대기열 패널티 + 처리량 보너스 |
+| 관측 `shape=(10,)` | `[queue×4, speed×4, phase_norm, elapsed_norm]` (동적 lane 감지, 최대 4 lane) |
+| 보상 `--reward-mode` | `queue`: `−(mean+max)/10 + throughput×0.5` (기본, 기아 방향 추가 패널티) |
+| | `diff-waiting-time`: 누적 대기시간 변화량 (SUMO-RL 검증 방식) |
+| | `pressure`: 출력 lane − 입력 lane 차량 수 (처리량 직접 최대화) |
 | 제약 | phase 변경 시 yellow 삽입, minimum green time 적용 |
 
 ### 시스템 구조도
@@ -92,8 +95,9 @@ SumoParallelEnv (PettingZoo ParallelEnv)
  sumo_data/ XML
 ```
 
-에이전트 매핑: `tl_0 → TLS "C"`, `tl_1 → TLS "D"`, ...  
-모든 에이전트가 하나의 shared policy를 공유 → 다중 교차로로 자연스럽게 확장.
+에이전트 매핑: `tl_0 → TLS "C"`, `tl_1 → TLS "D"`, ...  (2×2 격자: `tl_0→"1"`, `tl_1→"2"`, `tl_2→"5"`, `tl_3→"6"`)  
+모든 에이전트가 하나의 shared policy를 공유 → 다중 교차로로 자연스럽게 확장.  
+Lane은 `trafficlight.getControlledLanes()` 로 동적 감지 — 임의 SUMO 네트워크에서 동작.
 
 ---
 
@@ -113,18 +117,27 @@ python train_mappo.py --num-iters 200 --out models/MAPPO_sumo_exp1
 
 # 다중 교차로 확장
 python train_mappo.py --tls-ids C D E --num-workers 3
+
+# 보상 함수 변경 (SUMO-RL 방식)
+python train_mappo.py --reward-mode diff-waiting-time --num-iters 100
+python train_mappo.py --reward-mode pressure --num-iters 100
+
+# 2x2 격자 교차로 (SUMO-RL 네트워크 사용)
+python train_mappo.py --tls-ids 1 2 5 6 --sumo-cfg sumo_data/2x2grid.sumocfg --num-workers 4
 ```
 
 **주요 인자**
 
 | 인자 | 기본값 | 설명 |
 |------|--------|------|
-| `--num-iters` | 200 | 학습 반복 횟수 (1 iter = 4000 스텝 수집 후 10 epoch 업데이트) |
+| `--num-iters` | 200 | 학습 반복 횟수 (1 iter = 4000 스텝 수집 후 6 epoch 업데이트) |
 | `--num-workers` | 1 | Ray env runner 수 (0=driver 직접 수행, 디버깅 권장) |
 | `--out` | 자동 | 체크포인트 저장 경로 (`models/MAPPO_sumo_N` 자동 버전) |
 | `--checkpoint-freq` | 20 | 중간 체크포인트 주기 (iter 단위) |
-| `--tls-ids` | `["C"]` | SUMO TLS id 목록 (다중 교차로 확장 시 추가) |
+| `--tls-ids` | `["C"]` | SUMO TLS id 목록 (2x2 격자: `1 2 5 6`) |
 | `--seed` | 42 | 전역 랜덤 시드 (random / numpy / torch 일괄 설정) |
+| `--reward-mode` | `queue` | 보상 함수: `queue` / `diff-waiting-time` / `pressure` |
+| `--sumo-cfg` | 자동 | SUMO 설정 파일 경로 (미지정 시 기본 단일교차로 사용) |
 
 **스텝 수 계산**
 
@@ -134,6 +147,21 @@ train_batch_size=4000 × num_iters = 총 env steps
 iter 1회 ≈ 5~6 에피소드
 ```
 
+**PPO 하이퍼파라미터 (현재 설정)**
+
+| 파라미터 | 값 | 설명 |
+|---------|-----|------|
+| `lr` | `1e-4` | policy 진동 억제 (이전: 3e-4) |
+| `num_epochs` | `6` | 배치당 SGD 업데이트 (이전: 10) |
+| `vf_loss_coeff` | `0.5` | VF 급학습 시 advantage 급변 완화 (이전: 1.0) |
+| `entropy_coeff` | `0.02` | 조기 수렴 방지 (이전: 0.01) |
+| `train_batch_size` | `4000` | 수집 스텝 수 |
+| `minibatch_size` | `128` | SGD 미니배치 크기 |
+| `gamma` | `0.99` | 할인율 |
+| `lambda_` | `0.95` | GAE λ |
+| `clip_param` | `0.2` | PPO clip ε |
+| `vf_clip_param` | `500.0` | VF clip (discounted return 범위 ≈ −300~−500) |
+
 ### 2. 평가
 
 ```bash
@@ -141,8 +169,12 @@ iter 1회 ≈ 5~6 에피소드
 # 출력: results/eval_metrics_mappo_N.csv  (N = 모델 버전 번호 자동)
 python evaluate_mappo.py --model models/MAPPO_sumo_1 --episodes 5
 
-# 학습 시 tls-ids를 변경했다면 동일하게 전달
-python evaluate_mappo.py --model models/MAPPO_sumo_1 --tls-ids C
+# 학습 시 tls-ids / reward-mode / sumo-cfg 를 변경했다면 동일하게 전달
+python evaluate_mappo.py --model models/MAPPO_sumo_1 --tls-ids C --reward-mode queue
+
+# 2x2 격자 평가
+python evaluate_mappo.py --model models/MAPPO_sumo_7 \
+  --tls-ids 1 2 5 6 --sumo-cfg sumo_data/2x2grid.sumocfg
 ```
 
 > **쌍대 비교**: 동일 에피소드 인덱스에 동일 SUMO seed를 사용해  
@@ -155,9 +187,44 @@ python evaluate_mappo.py --model models/MAPPO_sumo_1 --tls-ids C
 # 출력: videos/mappo_policy_rollout_N.mp4  (N = 모델 버전 번호 자동)
 python record_video_mappo.py --model models/MAPPO_sumo_1
 
-# 학습 시 tls-ids를 변경했다면 동일하게 전달
-python record_video_mappo.py --model models/MAPPO_sumo_1 --tls-ids C
+# 학습 시 tls-ids / reward-mode / sumo-cfg 를 변경했다면 동일하게 전달
+python record_video_mappo.py --model models/MAPPO_sumo_1 --tls-ids C --reward-mode queue
 ```
+
+### 4. 2×2 격자 교차로 (SUMO-RL 네트워크)
+
+SUMO-RL 라이브러리의 2×2 격자 네트워크를 GreenWave에서 그대로 사용할 수 있습니다.
+
+**네트워크 정보**
+
+| 항목 | 내용 |
+|------|------|
+| 네트워크 | `sumo_rl/nets/2x2grid/2x2.net.xml` (SUMO-RL) |
+| TLS IDs | `"1"` (좌상), `"2"` (우상), `"5"` (좌하), `"6"` (우하) |
+| 트래픽 수요 | 4방향 통과 flow (확률 0.1/step) |
+| 설정 파일 | `sumo_data/2x2grid.sumocfg` (GreenWave 내 포함) |
+
+```bash
+# 2×2 격자 학습 (4 에이전트, 4 workers 권장)
+python train_mappo.py \
+  --tls-ids 1 2 5 6 \
+  --sumo-cfg sumo_data/2x2grid.sumocfg \
+  --reward-mode diff-waiting-time \
+  --num-workers 4 \
+  --num-iters 100 \
+  --seed 42
+
+# 2×2 격자 평가
+python evaluate_mappo.py \
+  --model models/MAPPO_sumo_N \
+  --tls-ids 1 2 5 6 \
+  --sumo-cfg sumo_data/2x2grid.sumocfg \
+  --reward-mode diff-waiting-time \
+  --episodes 5
+```
+
+> **주의**: `sumo_data/2x2grid.sumocfg`는 SUMO-RL 설치 경로의 절대경로를 참조합니다.  
+> 경로가 다르다면 파일 내 `net-file` / `route-files` 값을 실제 경로로 수정하세요.
 
 ---
 
@@ -213,7 +280,7 @@ action = int(torch.argmax(
 
 ## 참고
 
-- `sumo_data/single_intersection.net.xml` 이 없으면 첫 실행 시 `netconvert`로 자동 생성 (임시 파일 → atomic rename으로 병렬 worker 충돌 방지)
+- `sumo_data/single_intersection.net.xml` 이 없으면 기본 단일교차로 첫 실행 시 `netconvert`로 자동 생성 (임시 파일 → atomic rename, 병렬 worker 충돌 방지). `--sumo-cfg` 지정 시 자동 생성 불필요 — 호출하지 않음
 - RLlib 체크포인트는 디렉터리 형식으로 저장 (`models/MAPPO_sumo_N/`)
 - `--num-workers 0`: driver process에서 직접 롤아웃 (디버깅 용이, SUMO 1개)
 - `--num-workers N≥1`: 별도 worker process로 SUMO N개 병렬 실행 (학습 속도 향상)
@@ -222,3 +289,8 @@ action = int(torch.argmax(
 - 잘못된 `--tls-ids` 전달 시 TraCI 연결 직후 명확한 에러 메시지로 조기 종료
 - 평가 출력 파일은 모델 버전을 자동 반영 (`eval_metrics_mappo_N.csv`, `mappo_policy_rollout_N.mp4`)
 - 주요 산출물(`models/`, `results/`, `videos/`)은 gitignored — 참조용 샘플은 `samples/` 참조
+- `--reward-mode diff-waiting-time`: 누적 대기시간 변화량 기반 보상 (SUMO-RL 검증 방식, 방향 기아 방지)
+- `--reward-mode pressure`: 출력−입력 차량 수 차이 (처리량 직접 최대화)
+- 학습·평가·영상 스크립트 모두 `--reward-mode` / `--sumo-cfg` 인자 일치 필요
+- **2x2 격자**: `sumo_data/2x2grid.sumocfg` → SUMO-RL 네트워크 파일 참조 (TLS: 1,2,5,6)
+  lane은 `trafficlight.getControlledLanes()` 로 동적 감지 — 임의 SUMO 네트워크 지원
