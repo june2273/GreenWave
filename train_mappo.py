@@ -5,9 +5,12 @@ Ray RLlib MAPPO — SUMO 교차로 신호제어 학습
 다중 교차로(tl_0, tl_1, ...) 확장 시 tls_ids 인자만 추가하면 됩니다.
 """
 import argparse
+import json
 import math
+import os
 import random
 import re
+import time
 from pathlib import Path
 
 import numpy as np
@@ -18,6 +21,11 @@ from gymnasium import spaces
 from ray.rllib.algorithms.ppo import PPOConfig
 from ray.rllib.env.wrappers.pettingzoo_env import ParallelPettingZooEnv
 from ray.tune.registry import register_env
+
+try:
+    import psutil  # ray 의 transitive dep — 항상 설치되어 있음
+except ImportError:
+    psutil = None  # 메모리/프로세스 모니터링은 best-effort 로 동작
 
 try:
     from .env_sumo_pz import SumoParallelEnv
@@ -46,6 +54,124 @@ def _next_out_path(algo: str = "MAPPO", model_dir: str = "models") -> str:
         if (m := pat.match(entry.name))
     ]
     return str(d / f"{algo}_sumo_{max(versions, default=0) + 1}")
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 시스템 모니터링 헬퍼 — 메모리 누수 / SUMO 프로세스 누수 감지
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _process_rss_mb() -> float:
+    """현재 Python 프로세스 RSS (MiB). psutil 미설치 시 NaN.
+
+    iter 별로 기록해 우상향 그래프가 보이면 메모리 누수 의심.
+    """
+    if psutil is None:
+        return float("nan")
+    return psutil.Process(os.getpid()).memory_info().rss / (1024 * 1024)
+
+
+def _sumo_process_count() -> int:
+    """현재 머신에서 실행 중인 SUMO 프로세스 수.
+
+    reset()에서 traci.start() / close() 사이 누수가 발생하면 증가.
+    Ray worker 수보다 많으면 좀비 프로세스 의심.
+    """
+    if psutil is None:
+        return -1
+    count = 0
+    for p in psutil.process_iter(attrs=["name"]):
+        try:
+            name = (p.info.get("name") or "").lower()
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+        if name.startswith("sumo"):
+            count += 1
+    return count
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 커스텀 콜백 — env info에 노출된 진단 지표를 RLlib 메트릭으로 끌어올림
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _build_callback():
+    """RLlib 콜백 클래스를 동적으로 생성.
+
+    Ray 버전별 콜백 API가 다르므로 (RLlibCallback ↔ DefaultCallbacks),
+    import 가능한 것을 골라 on_episode_end 핸들러를 안전하게 등록한다.
+    """
+    try:
+        from ray.rllib.callbacks.callbacks import RLlibCallback as _Base
+    except ImportError:
+        from ray.rllib.algorithms.callbacks import DefaultCallbacks as _Base
+
+    class GreenWaveMetricsCallback(_Base):
+        """에피소드 종료 시점에 env info에서 진단 지표를 추출해 metrics에 기록.
+
+        기록 지표:
+          - policy/phase_switches : 에피소드 누적 phase 전환 수
+          - policy/teleported     : SUMO grid lock 텔레포트 차량 수
+          - policy/max_queue      : 단일 lane 최대 halting 차량 수
+          - policy/action_{0..3}_ratio : 정책 행동 분포 (mode collapse 진단)
+        """
+
+        def on_episode_end(self, *, episode=None, metrics_logger=None, **kwargs):
+            # 1. 마지막 info 추출 (Ray 버전별 episode API 차이 흡수)
+            last_info = self._extract_last_info(episode)
+            if not last_info:
+                return
+
+            # 2. metrics_logger (new API) 또는 episode.custom_metrics (old API) 사용
+            self._log_metric(episode, metrics_logger,
+                             "phase_switches", float(last_info.get("phase_switches", 0)))
+            self._log_metric(episode, metrics_logger,
+                             "teleported", float(last_info.get("teleported", 0)))
+            self._log_metric(episode, metrics_logger,
+                             "max_queue", float(last_info.get("max_queue", 0)))
+
+            counts = last_info.get("action_counts", [0, 0, 0, 0])
+            total = sum(counts) or 1
+            for i in range(4):
+                self._log_metric(episode, metrics_logger,
+                                 f"action_{i}_ratio", counts[i] / total)
+
+        @staticmethod
+        def _extract_last_info(episode):
+            """MultiAgentEpisode / EpisodeV2 양쪽에서 안전하게 마지막 info 추출."""
+            if episode is None:
+                return None
+            # New API stack (MultiAgentEpisode)
+            try:
+                agent_ids = list(episode.agent_ids)
+                if agent_ids:
+                    infos = episode.get_infos(agent_ids[0])
+                    if infos:
+                        return infos[-1]
+            except (AttributeError, TypeError):
+                pass
+            # Old API stack (EpisodeV2)
+            try:
+                # 어느 agent든 동일한 episode-level info를 반환
+                for aid in ("tl_0", "tl_1", "tl_2", "tl_3"):
+                    info = episode.last_info_for(aid)
+                    if info:
+                        return info
+            except (AttributeError, TypeError):
+                pass
+            return None
+
+        @staticmethod
+        def _log_metric(episode, metrics_logger, key, value):
+            """new API: metrics_logger.log_value / old API: episode.custom_metrics."""
+            if metrics_logger is not None:
+                try:
+                    metrics_logger.log_value(key, value)
+                    return
+                except Exception:
+                    pass
+            if episode is not None and hasattr(episode, "custom_metrics"):
+                episode.custom_metrics[key] = value
+
+    return GreenWaveMetricsCallback
 
 
 def parse_args():
@@ -105,6 +231,20 @@ def main():
     )
     act_space = spaces.Discrete(4)
 
+    # 하이퍼파라미터 — 한 곳에 모아두고 메타데이터에도 동일하게 기록
+    hparams = dict(
+        lr=1e-4,
+        gamma=0.99,
+        train_batch_size=4000,
+        num_epochs=6,
+        minibatch_size=128,
+        lambda_=0.95,
+        clip_param=0.2,
+        vf_loss_coeff=0.5,
+        entropy_coeff=0.02,
+        vf_clip_param=500.0,
+    )
+
     config = (
         PPOConfig()
         .environment("sumo_pz", env_config=env_config)
@@ -113,24 +253,14 @@ def main():
         # num_env_runners≥1: 별도 worker process 사용 (안정적 병렬 수집)
         .env_runners(num_env_runners=args.num_workers)
         .resources(num_gpus=0)  # M4 Mac: RLlib은 MPS 미지원, CPU 학습
+        .callbacks(callbacks_class=_build_callback())  # 진단 지표 RLlib 메트릭 등록
         .multi_agent(
             # MAPPO 핵심: 모든 에이전트가 하나의 shared policy를 공유
             # 다중 교차로 확장 시에도 이 구조 그대로 사용
             policies={"shared_policy": (None, obs_space, act_space, {})},
             policy_mapping_fn=lambda agent_id, episode, **kwargs: "shared_policy",
         )
-        .training(
-            lr=1e-4,              # 3e-4 → 1e-4: policy 진동 억제 (loss/policy ±0.07 → ±0.03)
-            gamma=0.99,
-            train_batch_size=4000,
-            num_epochs=6,         # 10 → 6: 배치당 업데이트 횟수 축소, overshoot 방지
-            minibatch_size=128,   # Ray 2.10+: sgd_minibatch_size → minibatch_size
-            lambda_=0.95,         # GAE λ
-            clip_param=0.2,       # PPO clip ε
-            vf_loss_coeff=0.5,    # 1.0 → 0.5: VF 급학습 시 advantage 급변 완화
-            entropy_coeff=0.02,   # 0.01 → 0.02: 조기 수렴 방지, 탐색 유지
-            vf_clip_param=500.0,  # discounted return 범위 -300~-500, 여유 있게 설정
-        )
+        .training(**hparams)
     )
 
     algo = config.build_algo()
@@ -140,13 +270,40 @@ def main():
 
     run_name = Path(out_path).name
     tb_writer = SummaryWriter(log_dir=f"results/tb_mappo/{run_name}")
+
+    # 학습 메타데이터 (평가 시 CSV에 복제되어 출처 추적 가능)
+    train_meta = {
+        "model_name":   run_name,
+        "model_path":   out_path,
+        "tls_ids":      args.tls_ids,
+        "reward_mode":  args.reward_mode,
+        "seed":         args.seed,
+        "num_workers":  args.num_workers,
+        "max_steps":    args.max_steps,
+        "delta_time":   args.delta_time,
+        "min_green":    args.min_green,
+        "yellow_time":  args.yellow_time,
+        "sumo_cfg":     args.sumo_cfg,
+        # 학습 중 갱신됨
+        "train_iter":        0,
+        "train_total_steps": 0,
+        **hparams,
+    }
+
+    def _save_metadata():
+        (Path(out_path) / "train_metadata.json").write_text(
+            json.dumps(train_meta, indent=2, ensure_ascii=False)
+        )
+
     print(f"학습 시작 | iters={args.num_iters} | workers={args.num_workers} "
           f"| tls={args.tls_ids} | reward={args.reward_mode} | seed={args.seed} | out={out_path}")
     print(f"TensorBoard: tensorboard --logdir results/tb_mappo")
 
     try:
         for i in range(1, args.num_iters + 1):
+            t0 = time.time()
             result = algo.train()
+            iter_time = time.time() - t0
 
             # Ray 2.10+: 지표 경로 변경 (env_runner_results→env_runners, learner_results→learners)
             env_stats    = result.get("env_runners", {})
@@ -157,28 +314,61 @@ def main():
             tb_writer.add_scalar("episode/len_mean",  ep_len,      i)
             tb_writer.add_scalar("train/total_steps", total_steps, i)
 
-            # 손실 지표 (Ray 2.10+: learners 하위)
+            # 손실 + grad_norm 지표 (Ray 2.10+: learners 하위)
             policy_stats = result.get("learners", {}).get("shared_policy", {})
             for tag, key in (
-                ("loss/total",   "total_loss"),
-                ("loss/policy",  "policy_loss"),
-                ("loss/value",   "vf_loss"),
-                ("loss/entropy", "entropy"),
+                ("loss/total",       "total_loss"),
+                ("loss/policy",      "policy_loss"),
+                ("loss/value",       "vf_loss"),
+                ("loss/entropy",     "entropy"),
+                # grad_norm: RLlib 2.10+ 가 자동 기록하는 키들 중 발견되는 것을 사용
+                ("learner/grad_norm_global",      "gradients_default_optimizer_global_norm"),
+                ("learner/grad_norm_policy",      "gradients_policy_default_optimizer_global_norm"),
             ):
                 val = policy_stats.get(key)
                 if val is not None:
                     tb_writer.add_scalar(tag, val, i)
 
+            # 콜백이 등록한 커스텀 메트릭 (action_dist, phase_switches, teleported, max_queue)
+            # new API stack: env_stats 하위에 평탄화되어 들어옴
+            # old API stack: env_stats["custom_metrics"]["<key>_mean"] 형태
+            custom = env_stats.get("custom_metrics", {})
+            for k in ("phase_switches", "teleported", "max_queue",
+                      "action_0_ratio", "action_1_ratio",
+                      "action_2_ratio", "action_3_ratio"):
+                # 후보 키 순회: 정확한 키 우선, 이후 _mean 변형
+                val = env_stats.get(k, env_stats.get(f"{k}_mean",
+                       custom.get(f"{k}_mean", custom.get(k))))
+                if val is not None and not (isinstance(val, float) and math.isnan(val)):
+                    if k.startswith("action_"):
+                        tb_writer.add_scalar(f"policy/action_dist/{k.replace('_ratio','')}", val, i)
+                    else:
+                        tb_writer.add_scalar(f"policy/{k}", val, i)
+
+            # 시스템 지표 — 메모리 누수 / SUMO 좀비 프로세스 / iter time
+            tb_writer.add_scalar("system/process_rss_mb",     _process_rss_mb(),  i)
+            tb_writer.add_scalar("system/sumo_process_count", _sumo_process_count(), i)
+            tb_writer.add_scalar("system/iter_time_sec",      iter_time, i)
+
             ep_str = f"{ep_len:.0f}" if not math.isnan(ep_len) else "nan"
             print(f"Iter {i:4d}/{args.num_iters} | "
-                  f"mean_reward={mean_rew:8.2f} | ep_len={ep_str} | steps={int(total_steps)}")
+                  f"mean_reward={mean_rew:8.2f} | ep_len={ep_str} | "
+                  f"steps={int(total_steps)} | "
+                  f"rss={_process_rss_mb():.0f}MB | iter_t={iter_time:.1f}s")
+
+            # 메타데이터 진행도 갱신 (checkpoint 시 같이 저장)
+            train_meta["train_iter"]        = i
+            train_meta["train_total_steps"] = int(total_steps)
 
             if i % args.checkpoint_freq == 0:
                 ckpt = algo.save(str(out_path))
+                _save_metadata()
                 print(f"  → checkpoint: {ckpt}")
 
         final_ckpt = algo.save(str(out_path))
+        _save_metadata()
         print(f"\n학습 완료. 최종 checkpoint: {final_ckpt}")
+        print(f"메타데이터: {out_path}/train_metadata.json")
     finally:
         tb_writer.close()
         algo.stop()

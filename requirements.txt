@@ -27,3 +27,6 @@ imageio-ffmpeg>=0.4.9
 # → PYTHONPATH 설정 없이 import traci / import sumolib 가능
 traci==1.20.0
 sumolib==1.20.0
+
+# 네트워크 시각화 (sumo_renderer.py)
+matplotlib>=3.7.0

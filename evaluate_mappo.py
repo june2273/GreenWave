@@ -1,10 +1,17 @@
 """
 MAPPO 평가 — RLlib 체크포인트 기반
 
-evaluate.py 와 동일한 지표(avg_waiting_time, avg_travel_time,
-total_queue_length, throughput)를 MAPPO vs Fixed-time 으로 비교해 CSV 저장.
+MAPPO vs Fixed-time 을 동일 SUMO seed로 쌍대 비교(paired comparison)하여
+지표 CSV를 생성. CSV는 두 가지 섹션을 포함:
+
+  1. raw rows     : 에피소드별 측정값 (algorithm × episode)
+  2. summary rows : 알고리즘별 mean / std (algorithm == "MAPPO_summary" 등)
+
+또한 모델 메타데이터(hyperparameters, train_iter)가 있으면 모든 행에
+복제 기록하여 캡쳐만 보고도 LLM이 출처 모델을 식별 가능.
 """
 import argparse
+import json
 import re
 from pathlib import Path
 
@@ -21,6 +28,21 @@ def _versioned_output(model_path: str, template: str, ext: str) -> str:
     return f"{template}{suffix}{ext}"
 
 
+def _load_train_metadata(model_path: str) -> dict:
+    """모델 디렉터리의 train_metadata.json 을 읽어 dict 반환 (없으면 빈 dict).
+
+    train_mappo.py 가 학습 종료 시 저장하는 파일이며, CSV 모든 행에 복제되어
+    캡쳐만 봐도 어떤 모델·하이퍼파라미터인지 LLM이 식별할 수 있게 한다.
+    """
+    meta_path = Path(model_path) / "train_metadata.json"
+    if not meta_path.exists():
+        return {}
+    try:
+        return json.loads(meta_path.read_text())
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
 import numpy as np
 import pandas as pd
 import ray
@@ -33,6 +55,15 @@ try:
     from .env_sumo_pz import SumoParallelEnv
 except ImportError:
     from env_sumo_pz import SumoParallelEnv
+
+
+# CSV 메트릭 컬럼 (raw 측정값 + 진단 지표)
+METRIC_COLS = [
+    "avg_waiting_time", "std_waiting_time", "avg_travel_time",
+    "total_queue_length", "throughput",
+    "phase_switches", "max_queue", "teleported",
+    "action_0_ratio", "action_1_ratio", "action_2_ratio", "action_3_ratio",
+]
 
 
 def _make_env(config: dict) -> ParallelPettingZooEnv:
@@ -64,6 +95,38 @@ def parse_args():
     return p.parse_args()
 
 
+def _action_ratios(action_counts: list) -> dict:
+    """action_counts 리스트 [n0, n1, n2, n3] → 비율 dict {action_k_ratio: ...}.
+
+    mode collapse 진단: 균등 분포에 가까우면 0.25씩, 한쪽 쏠림이면 1.0 근처.
+    """
+    counts = np.asarray(action_counts, dtype=np.float64)
+    total = counts.sum()
+    if total <= 0:
+        return {f"action_{i}_ratio": 0.0 for i in range(4)}
+    ratios = counts / total
+    return {f"action_{i}_ratio": float(ratios[i]) for i in range(4)}
+
+
+def _row_from_info(algorithm: str, ep: int, seed: int, info: dict) -> dict:
+    """env.step() 마지막 info → CSV row dict 변환 (진단 컬럼 평탄화)."""
+    row = {
+        "algorithm": algorithm,
+        "episode":   ep,
+        "seed":      seed,
+        "avg_waiting_time":   info.get("avg_waiting_time",   np.nan),
+        "std_waiting_time":   info.get("std_waiting_time",   np.nan),
+        "avg_travel_time":    info.get("avg_travel_time",    np.nan),
+        "total_queue_length": info.get("total_queue_length", np.nan),
+        "throughput":         info.get("throughput",         np.nan),
+        "phase_switches":     info.get("phase_switches",     np.nan),
+        "max_queue":          info.get("max_queue",          np.nan),
+        "teleported":         info.get("teleported",         np.nan),
+    }
+    row.update(_action_ratios(info.get("action_counts", [0, 0, 0, 0])))
+    return row
+
+
 def run_episode(env: SumoParallelEnv, action_fn, seed: int) -> dict:
     """에피소드 1회 실행 후 마지막 info 반환"""
     obs_dict, _ = env.reset(seed=seed)
@@ -84,6 +147,9 @@ def main():
     ray.init(ignore_reinit_error=True)
     algo = PPO.from_checkpoint(str(Path(args.model).resolve()))
     module = algo.get_module("shared_policy")
+
+    # 모델 학습 메타데이터 (없으면 빈 dict) — CSV 모든 행에 prefix로 부착
+    train_meta = _load_train_metadata(args.model)
 
     env_kwargs = dict(
         use_gui=False,
@@ -127,52 +193,87 @@ def main():
 
             # ── MAPPO ────────────────────────────────────────────────────────
             info = run_episode(env_mappo, mappo_action, seed=seed)
-            rows.append({
-                "algorithm": "MAPPO",
-                "episode":   ep,
-                "seed":      seed,
-                "avg_waiting_time":   info.get("avg_waiting_time",   np.nan),
-                "avg_travel_time":    info.get("avg_travel_time",    np.nan),
-                "total_queue_length": info.get("total_queue_length", np.nan),
-                "throughput":         info.get("throughput",         np.nan),
-            })
+            rows.append(_row_from_info("MAPPO", ep, seed, info))
+            r = rows[-1]
             print(f"[MAPPO]     ep={ep} seed={seed} | "
-                  f"wait={rows[-1]['avg_waiting_time']:.1f}s | "
-                  f"queue={rows[-1]['total_queue_length']:.0f}")
+                  f"wait={r['avg_waiting_time']:.1f}s | "
+                  f"queue={r['total_queue_length']:.0f} | "
+                  f"switches={r['phase_switches']:.0f} | "
+                  f"act_dist=[{r['action_0_ratio']:.2f},{r['action_1_ratio']:.2f},"
+                  f"{r['action_2_ratio']:.2f},{r['action_3_ratio']:.2f}] | "
+                  f"teleport={r['teleported']:.0f}")
 
             # ── FixedTime (동일 seed) ─────────────────────────────────────────
             info = run_episode(env_fix, fixed_action, seed=seed)
-            rows.append({
-                "algorithm": "FixedTime",
-                "episode":   ep,
-                "seed":      seed,
-                "avg_waiting_time":   info.get("avg_waiting_time",   np.nan),
-                "avg_travel_time":    info.get("avg_travel_time",    np.nan),
-                "total_queue_length": info.get("total_queue_length", np.nan),
-                "throughput":         info.get("throughput",         np.nan),
-            })
+            rows.append(_row_from_info("FixedTime", ep, seed, info))
+            r = rows[-1]
             print(f"[FixedTime] ep={ep} seed={seed} | "
-                  f"wait={rows[-1]['avg_waiting_time']:.1f}s | "
-                  f"queue={rows[-1]['total_queue_length']:.0f}")
+                  f"wait={r['avg_waiting_time']:.1f}s | "
+                  f"queue={r['total_queue_length']:.0f} | "
+                  f"teleport={r['teleported']:.0f}")
     finally:
         env_mappo.close()
         env_fix.close()
         algo.stop()
         ray.shutdown()
 
+    # ── 요약 행 추가 (algorithm별 mean / std) ─────────────────────────────
+    df_raw = pd.DataFrame(rows)
+    summary_rows = []
+    for algo_name in ("MAPPO", "FixedTime"):
+        sub = df_raw[df_raw["algorithm"] == algo_name]
+        if sub.empty:
+            continue
+        means = sub[METRIC_COLS].mean(numeric_only=True)
+        stds  = sub[METRIC_COLS].std(numeric_only=True, ddof=0)
+        summary_rows.append({
+            "algorithm": f"{algo_name}_mean",
+            "episode": "", "seed": "",
+            **{c: means[c] for c in METRIC_COLS},
+        })
+        summary_rows.append({
+            "algorithm": f"{algo_name}_std",
+            "episode": "", "seed": "",
+            **{c: stds[c] for c in METRIC_COLS},
+        })
+    df = pd.concat([df_raw, pd.DataFrame(summary_rows)], ignore_index=True)
+
+    # ── 메타데이터 prefix 컬럼 (모든 행에 동일값) ─────────────────────────
+    # 캡쳐만 보고도 LLM이 어느 모델·hyperparameter 결과인지 식별 가능
+    meta_prefix = {
+        "model_path":        str(Path(args.model).resolve()),
+        "train_iter":        train_meta.get("train_iter", ""),
+        "train_total_steps": train_meta.get("train_total_steps", ""),
+        "reward_mode":       train_meta.get("reward_mode", args.reward_mode),
+        "lr":                train_meta.get("lr", ""),
+        "entropy_coeff":     train_meta.get("entropy_coeff", ""),
+        "vf_clip_param":     train_meta.get("vf_clip_param", ""),
+        "train_seed":        train_meta.get("seed", ""),
+        "tls_ids":           "_".join(args.tls_ids),
+        "num_workers":       train_meta.get("num_workers", ""),
+    }
+    for k, v in meta_prefix.items():
+        df.insert(0, k, v)
+
     # ── 저장 및 출력 ──────────────────────────────────────────────────────
-    df = pd.DataFrame(rows)
     csv_out = args.csv_out or _versioned_output(args.model, "results/eval_metrics_mappo", ".csv")
     out_path = Path(csv_out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(out_path, index=False)
 
     print(f"\nSaved: {out_path}")
-    print("\n=== Mean Metrics by Algorithm ===")
-    print(df.groupby("algorithm")[[
-        "avg_waiting_time", "avg_travel_time",
-        "total_queue_length", "throughput"
-    ]].mean())
+    print(f"Train metadata: {'loaded' if train_meta else 'not found (older model)'}")
+    print("\n=== Summary (mean ± std) ===")
+    for algo_name in ("MAPPO", "FixedTime"):
+        sub = df_raw[df_raw["algorithm"] == algo_name][METRIC_COLS]
+        if sub.empty:
+            continue
+        print(f"\n[{algo_name}]")
+        for col in ("avg_waiting_time", "avg_travel_time",
+                    "total_queue_length", "throughput",
+                    "phase_switches", "teleported"):
+            m, s = sub[col].mean(), sub[col].std(ddof=0)
+            print(f"  {col:22s}: {m:>10.2f} ± {s:.2f}")
 
 
 if __name__ == "__main__":

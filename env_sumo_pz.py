@@ -20,6 +20,11 @@ except ImportError as exc:
         "pip install traci sumolib 또는 $SUMO_HOME/tools를 PYTHONPATH에 추가하세요."
     ) from exc
 
+try:
+    from sumo_renderer import SumoRenderer
+except ImportError:
+    from .sumo_renderer import SumoRenderer  # type: ignore[no-redef]
+
 
 class SumoParallelEnv(ParallelEnv):
     """
@@ -127,8 +132,21 @@ class SumoParallelEnv(ParallelEnv):
         self._throughput: int = 0
         self._queue_cumsum: float = 0.0
 
+        # 진단 지표 (mode collapse / network saturation 감지용)
+        # phase_switches    : 에피소드 누적 phase 전환 횟수 (agent 합산)
+        # max_queue         : 에피소드 중 단일 lane이 도달한 최대 halting 차량 수
+        # action_counts     : agent×action 누적 선택 횟수 (정책 분포 추적)
+        # teleported        : SUMO가 교착 해소를 위해 텔레포트한 차량 수
+        self._episode_phase_switches: int = 0
+        self._episode_max_queue: float = 0.0
+        self._episode_action_counts: np.ndarray = np.zeros(4, dtype=np.int64)
+        self._episode_teleported: int = 0
+
         # diff-waiting-time 보상 모드 전용: 직전 스텝의 agent별 누적 대기시간 합
         self._last_wait_measure: Dict[str, float] = {}
+
+        # 네트워크 시각화 렌더러 (matplotlib + sumolib 기반)
+        self._renderer = SumoRenderer(self.sumo_cfg)
 
     # ------------------------------------------------------------------
     # PettingZoo 필수 인터페이스
@@ -279,9 +297,22 @@ class SumoParallelEnv(ParallelEnv):
                         float(self._latest_waiting.pop(veh_id))
                     )
 
-            self._queue_cumsum += sum(
+            # lane별 halting 차량 수: cumsum 누적 + 단일 lane 최대값 추적
+            # (max_queue 는 1 step당 1번만 계산하면 충분 — 동일 루프에서 처리)
+            halting_per_lane = [
                 float(self.conn.lane.getLastStepHaltingNumber(ln))
                 for ln in self._lane_ids
+            ]
+            self._queue_cumsum += sum(halting_per_lane)
+            if halting_per_lane:
+                step_max = max(halting_per_lane)
+                if step_max > self._episode_max_queue:
+                    self._episode_max_queue = step_max
+
+            # teleport 누적: getStartingTeleportNumber는 "이번 step에 시작된 텔레포트 수"
+            # 네트워크 교착(grid lock) 발생 시 SUMO가 차량을 강제 이동시키는 신호
+            self._episode_teleported += int(
+                self.conn.simulation.getStartingTeleportNumber()
             )
 
             if self.sim_step >= self.max_steps:
@@ -325,6 +356,12 @@ class SumoParallelEnv(ParallelEnv):
         self._queue_cumsum = 0.0
         self._last_wait_measure.clear()
 
+        # 진단 카운터 초기화 (reset마다 0으로)
+        self._episode_phase_switches = 0
+        self._episode_max_queue = 0.0
+        self._episode_action_counts.fill(0)
+        self._episode_teleported = 0
+
         for agent in self.agents:
             self._current_phase[agent] = 0
             self._elapsed_phase_time[agent] = 0
@@ -335,6 +372,11 @@ class SumoParallelEnv(ParallelEnv):
         return observations, infos
 
     def step(self, actions: Dict[str, int]):
+        # 정책 출력 분포 추적 — min_green 미충족으로 실제 적용 안 된 action도 카운트
+        # (실제 적용된 phase는 _episode_phase_switches로 별도 측정)
+        for agent in self.agents:
+            self._episode_action_counts[int(actions[agent])] += 1
+
         # min_green 조건 만족 + phase 변경 요청인 에이전트 식별
         switching = {
             a: (
@@ -343,6 +385,7 @@ class SumoParallelEnv(ParallelEnv):
             )
             for a in self.agents
         }
+        self._episode_phase_switches += sum(switching.values())
 
         done = False
         throughput_before = self._throughput  # 스텝 시작 시점 처리량 스냅샷
@@ -376,6 +419,9 @@ class SumoParallelEnv(ParallelEnv):
         # 에이전트별 결과 계산
         avg_wait = (
             float(np.mean(self._completed_waiting)) if self._completed_waiting else 0.0
+        )
+        std_wait = (
+            float(np.std(self._completed_waiting)) if self._completed_waiting else 0.0
         )
         avg_travel = (
             float(np.mean(self._completed_travel)) if self._completed_travel else 0.0
@@ -422,9 +468,15 @@ class SumoParallelEnv(ParallelEnv):
                 "phase": self._current_phase[agent],
                 "phase_changed": switching[agent],
                 "avg_waiting_time": avg_wait,
+                "std_waiting_time": std_wait,
                 "avg_travel_time": avg_travel,
                 "total_queue_length": float(self._queue_cumsum),
                 "throughput": self._throughput,
+                # 진단 지표 (mode collapse / grid lock 감지)
+                "phase_switches": int(self._episode_phase_switches),
+                "max_queue": float(self._episode_max_queue),
+                "teleported": int(self._episode_teleported),
+                "action_counts": self._episode_action_counts.tolist(),
             }
 
         if done:
@@ -432,31 +484,19 @@ class SumoParallelEnv(ParallelEnv):
 
         return observations, rewards, terminations, truncations, infos
 
-    def render(self):
-        """첫 번째 에이전트(tl_0) 기준 간단 2D 시각화"""
-        agent = self.possible_agents[0]
-        obs = self._last_obs.get(agent, np.zeros(10, dtype=np.float32))
-        phase = self._current_phase.get(agent, 0)
-
-        h, w = 480, 640
-        frame = np.full((h, w, 3), 245, dtype=np.uint8)
-        frame[180:300, :] = 210
-        frame[:, 260:380] = 210
-        frame[190:290, 270:370] = 175
-
-        active = np.array([50, 180, 75], dtype=np.uint8)
-        inactive = np.array([200, 80, 70], dtype=np.uint8)
-        qn = min(int(obs[0] * 6), 150)
-        qs = min(int(obs[1] * 6), 150)
-        qe = min(int(obs[2] * 6), 150)
-        qw = min(int(obs[3] * 6), 150)
-
-        frame[max(20, 170 - qn):170, 300:340] = active if phase == 0 else inactive
-        frame[310:min(460, 310 + qs), 300:340] = active if phase == 1 else inactive
-        frame[220:260, 390:min(620, 390 + qe)] = active if phase == 2 else inactive
-        frame[220:260, max(20, 250 - qw):250] = active if phase == 3 else inactive
-
-        return frame
+    def render(self) -> np.ndarray:
+        """
+        matplotlib + sumolib 기반 네트워크 시각화.
+        sumo_renderer.SumoRenderer에 현재 신호 상태를 전달해 RGB 배열 반환.
+        net.xml 로드에 실패한 경우 단일교차로 numpy fallback 사용.
+        """
+        return self._renderer.render(
+            agent_to_tls=self._agent_to_tls,
+            current_phase=self._current_phase,
+            last_obs=self._last_obs,
+            sim_step=self.sim_step,
+            max_steps=self.max_steps,
+        )
 
     def close(self):
         if self.conn is not None:
