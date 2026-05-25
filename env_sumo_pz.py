@@ -26,6 +26,11 @@ except ImportError:
     from .sumo_renderer import SumoRenderer  # type: ignore[no-redef]
 
 
+# SUMO 기본 차량 길이(5m) + min_gap(2.5m) 기반 lane 용량 추정 상수
+# obs density/queue 정규화에 사용 — 정확치는 아니지만 [0,1] 근사 보장
+_VEHICLE_FOOTPRINT_M = 7.5
+
+
 class SumoParallelEnv(ParallelEnv):
     """
     PettingZoo Parallel API 기반 SUMO 교차로 신호제어 환경
@@ -33,12 +38,19 @@ class SumoParallelEnv(ParallelEnv):
     단일 교차로: tls_ids=["C"]  → agents=["tl_0"]
     다중 교차로: tls_ids=["C","D",...] → agents=["tl_0","tl_1",...]
 
-    행동(Discrete 4): 0=North / 1=South / 2=East / 3=West 단독 green
-    관측(shape 10): [queue×4, speed×4, phase_norm, elapsed_norm]  (동적 lane 감지, 최대 4 lane)
-    보상(reward_mode 선택):
-      "queue"            : -(mean(queues)+max(queues))/10 + throughput×0.5  — 기아 방향 추가 패널티
-      "diff-waiting-time": -(누적대기 변화량)/100  — 대기 감소 시 양의 보상 (SUMO-RL 방식)
-      "pressure"         : out_vehicles - in_vehicles  — 처리량 직접 최대화
+    Action / Observation 설계 (SUMO-RL 호환):
+      - Action: Discrete(num_green_phases) — 네트워크에서 자동 감지된 green phase 중 선택
+                * 단일교차로 (`tls.tll.xml`): 4 green phases → Discrete(4)
+                * 2x2grid (sumo-rl): 4 green phases [0,2,4,6] → Discrete(4)
+                yellow phase는 정책이 직접 선택할 수 없고, green 전환 시 자동 삽입됨.
+      - Observation: [phase_one_hot, min_green_flag, density_per_lane, queue_per_lane]
+                shape = num_green + 1 + 2 * num_controlled_lanes
+                density/queue는 lane capacity 기반 [0,1] 정규화.
+
+    보상(reward_mode):
+      "queue"            : -(mean(queues)+max(queues))/10 + throughput×0.5
+      "diff-waiting-time": 누적 대기시간 변화량 (SUMO-RL 검증 방식)
+      "pressure"         : 출력 lane 차량 수 - 입력 lane 차량 수
     """
 
     metadata = {
@@ -47,10 +59,6 @@ class SumoParallelEnv(ParallelEnv):
         "name": "sumo_intersection_v0",
     }
 
-    # 보상 모드 선택지
-    # "queue"            : -(mean(queues) + max(queues)) / 10  — 기아 방향 추가 패널티
-    # "diff-waiting-time": 누적 대기시간 변화량 (SUMO-RL 검증 방식)
-    # "pressure"         : 출력 lane 차량 수 - 입력 lane 차량 수 (처리량 직접 최대화)
     REWARD_MODES: List[str] = ["queue", "diff-waiting-time", "pressure"]
 
     def __init__(
@@ -72,10 +80,8 @@ class SumoParallelEnv(ParallelEnv):
                 raise FileNotFoundError(
                     f"SUMO 설정 파일을 찾을 수 없습니다: {self.sumo_cfg}"
                 )
-            # 외부 네트워크 사용 시 GreenWave 기본 net 자동생성 불필요
         else:
             self.sumo_cfg = self.sumo_data_dir / "single.sumocfg"
-            # 기본 단일교차로 net.xml이 없을 때만 netconvert로 자동 생성
             self._maybe_build_network()
 
         if reward_mode not in self.REWARD_MODES:
@@ -100,23 +106,40 @@ class SumoParallelEnv(ParallelEnv):
             zip(self.possible_agents, self._tls_ids)
         )
 
-        # 동적 lane id 테이블 (reset 시 _start_sumo() 에서 getControlledLanes() 로 채워짐)
-        # _per_agent_lanes  : agent별 입력 lane id 목록 (관측·보상 계산)
-        # _per_agent_out_lanes: agent별 출력 lane id 목록 (pressure 보상 전용)
-        # _lane_ids         : 전체 에이전트 입력 lane 합집합 (queue_cumsum 집계)
-        self._per_agent_lanes: Dict[str, List[str]] = {}
-        self._per_agent_out_lanes: Dict[str, List[str]] = {}
-        self._lane_ids: List[str] = []
+        # ── 네트워크 정적 스펙 사전 추출 (probe) ─────────────────────────────
+        # obs/act space 결정에 controlled lanes 수 + green phase 인덱스가 필요.
+        # SUMO 한 번 띄워 정보만 수집하고 즉시 종료. (reset 시 재시작)
+        spec = self._probe_network_spec()
+        self._per_agent_lanes: Dict[str, List[str]] = spec["per_agent_lanes"]
+        self._per_agent_out_lanes: Dict[str, List[str]] = spec["per_agent_out_lanes"]
+        self._per_agent_green_phases: Dict[str, List[int]] = spec["per_agent_green_phases"]
+        self._per_agent_yellow_map: Dict[str, Dict[int, int]] = spec["per_agent_yellow_map"]
+        self._lane_capacities: Dict[str, float] = spec["lane_capacities"]
 
-        # agents: 현재 에피소드에서 활성 에이전트 (reset 시 복원, done 시 빈 리스트)
+        # 전체 입력 lane 합집합 (queue_cumsum 집계용)
+        self._lane_ids: List[str] = list(dict.fromkeys(
+            ln for agent in self.possible_agents
+            for ln in self._per_agent_lanes[agent]
+        ))
+
+        # 모든 agent의 obs/act 차원이 동일하다고 가정 (정사각 grid). 첫 agent 기준.
+        # 다른 형태가 필요하면 max+padding 방식으로 확장 가능.
+        first = self.possible_agents[0]
+        self._num_green: int = len(self._per_agent_green_phases[first])
+        self._num_lanes: int = len(self._per_agent_lanes[first])
+        self._obs_dim: int = self._num_green + 1 + 2 * self._num_lanes
+
+        # agents: 현재 에피소드 활성 에이전트
         self.agents: List[str] = []
 
         # 에이전트별 신호 상태
+        # _current_green_idx: green_phases 리스트 내 인덱스 (0..num_green-1)
+        # _current_phase   : SUMO 실제 phase index (전환 시 동기화)
+        self._current_green_idx: Dict[str, int] = {}
         self._current_phase: Dict[str, int] = {}
         self._elapsed_phase_time: Dict[str, int] = {}
-        self._yellow_phase_index: Dict[str, int] = {}
         self._last_obs: Dict[str, np.ndarray] = {
-            a: np.zeros(10, dtype=np.float32) for a in self.possible_agents
+            a: np.zeros(self._obs_dim, dtype=np.float32) for a in self.possible_agents
         }
 
         # TraCI 연결
@@ -132,38 +155,34 @@ class SumoParallelEnv(ParallelEnv):
         self._throughput: int = 0
         self._queue_cumsum: float = 0.0
 
-        # 진단 지표 (mode collapse / network saturation 감지용)
-        # phase_switches    : 에피소드 누적 phase 전환 횟수 (agent 합산)
-        # max_queue         : 에피소드 중 단일 lane이 도달한 최대 halting 차량 수
-        # action_counts     : agent×action 누적 선택 횟수 (정책 분포 추적)
-        # teleported        : SUMO가 교착 해소를 위해 텔레포트한 차량 수
+        # 진단 카운터 (action_counts는 동적 num_green 길이)
         self._episode_phase_switches: int = 0
         self._episode_max_queue: float = 0.0
-        self._episode_action_counts: np.ndarray = np.zeros(4, dtype=np.int64)
+        self._episode_action_counts: np.ndarray = np.zeros(self._num_green, dtype=np.int64)
         self._episode_teleported: int = 0
 
-        # diff-waiting-time 보상 모드 전용: 직전 스텝의 agent별 누적 대기시간 합
+        # diff-waiting-time 보상 모드 전용
         self._last_wait_measure: Dict[str, float] = {}
 
-        # 네트워크 시각화 렌더러 (matplotlib + sumolib 기반)
+        # 네트워크 시각화 렌더러
         self._renderer = SumoRenderer(self.sumo_cfg)
 
     # ------------------------------------------------------------------
-    # PettingZoo 필수 인터페이스
+    # PettingZoo 필수 인터페이스 — obs/act space 동적 결정
     # ------------------------------------------------------------------
 
     @functools.lru_cache(maxsize=None)
     def observation_space(self, agent: str) -> spaces.Space:
         return spaces.Box(
             low=0.0,
-            high=np.finfo(np.float32).max,
-            shape=(10,),
+            high=1.0,
+            shape=(self._obs_dim,),
             dtype=np.float32,
         )
 
     @functools.lru_cache(maxsize=None)
     def action_space(self, agent: str) -> spaces.Space:
-        return spaces.Discrete(4)
+        return spaces.Discrete(self._num_green)
 
     # ------------------------------------------------------------------
     # SUMO 유틸리티
@@ -178,7 +197,6 @@ class SumoParallelEnv(ParallelEnv):
             raise FileNotFoundError(
                 "single_intersection.net.xml이 없고 netconvert도 찾을 수 없습니다."
             )
-        # 임시 파일에 먼저 생성 후 atomic rename → 병렬 worker 동시 시작 시 TOCTOU 방지
         tmp_fd, tmp_path = tempfile.mkstemp(
             suffix=".net.xml", dir=self.sumo_data_dir
         )
@@ -197,7 +215,7 @@ class SumoParallelEnv(ParallelEnv):
                 raise RuntimeError(
                     f"netconvert 네트워크 생성 실패.\n{result.stderr}"
                 )
-            os.replace(tmp_path, net_file)  # POSIX atomic
+            os.replace(tmp_path, net_file)
         except Exception:
             Path(tmp_path).unlink(missing_ok=True)
             raise
@@ -212,6 +230,146 @@ class SumoParallelEnv(ParallelEnv):
                 return found
             raise FileNotFoundError(f"SUMO binary를 찾을 수 없습니다: {preferred}")
 
+    # ------------------------------------------------------------------
+    # 네트워크 스펙 probe — obs/act space 결정에 필요한 정적 정보 추출
+    # ------------------------------------------------------------------
+
+    def _probe_network_spec(self) -> dict:
+        """임시 SUMO 인스턴스를 띄워 controlled lanes / green phases / lane capacity를 수집.
+
+        TraCI 연결을 즉시 닫고 정보만 메모리에 보관. 이후 reset() 마다 SUMO 재시작.
+        """
+        binary = self._sumo_binary()
+        label = f"probe_{uuid.uuid4().hex[:8]}"
+        cmd = [
+            binary, "-c", str(self.sumo_cfg),
+            "--no-warnings", "true",
+            "--no-step-log", "true",
+        ]
+        # traci.start 가 raise 되면 conn 이 정의되지 않은 채 finally에 진입 →
+        # NameError 방지를 위해 사전 초기화
+        conn = None
+        try:
+            traci.start(cmd, label=label)
+            conn = traci.getConnection(label)
+            known_tls = set(conn.trafficlight.getIDList())
+            missing = [tid for tid in self._tls_ids if tid not in known_tls]
+            if missing:
+                raise ValueError(
+                    f"SUMO 네트워크에 존재하지 않는 TLS ID: {missing}. "
+                    f"사용 가능한 TLS: {sorted(known_tls)}"
+                )
+
+            per_agent_lanes: Dict[str, List[str]] = {}
+            per_agent_out_lanes: Dict[str, List[str]] = {}
+            per_agent_green_phases: Dict[str, List[int]] = {}
+            per_agent_yellow_map: Dict[str, Dict[int, int]] = {}
+            lane_capacities: Dict[str, float] = {}
+
+            for agent, tls_id in zip(self.possible_agents, self._tls_ids):
+                lanes = list(dict.fromkeys(
+                    conn.trafficlight.getControlledLanes(tls_id)
+                ))
+                per_agent_lanes[agent] = lanes
+                out_lanes = list(set(
+                    link[0][1]
+                    for link in conn.trafficlight.getControlledLinks(tls_id)
+                    if link
+                ))
+                per_agent_out_lanes[agent] = out_lanes
+
+                # lane 용량 추정: lane 길이 / 차량 footprint (5m + 2.5m gap)
+                for ln in lanes + out_lanes:
+                    if ln not in lane_capacities:
+                        length = float(conn.lane.getLength(ln))
+                        lane_capacities[ln] = max(1.0, length / _VEHICLE_FOOTPRINT_M)
+
+                # green phase 인덱스 + green→다음yellow 매핑
+                green_indices, yellow_map = self._extract_phase_structure(conn, tls_id)
+                per_agent_green_phases[agent] = green_indices
+                per_agent_yellow_map[agent] = yellow_map
+
+            # 첫 agent 기준 num_green 일치 검증 (정사각 grid 가정)
+            first_n = len(per_agent_green_phases[self.possible_agents[0]])
+            for agent in self.possible_agents:
+                if len(per_agent_green_phases[agent]) != first_n:
+                    raise ValueError(
+                        f"agent별 green phase 수가 다름: "
+                        f"{ {a: len(per_agent_green_phases[a]) for a in self.possible_agents} }. "
+                        "현재 구현은 동일 구조 교차로만 지원합니다."
+                    )
+
+            return {
+                "per_agent_lanes": per_agent_lanes,
+                "per_agent_out_lanes": per_agent_out_lanes,
+                "per_agent_green_phases": per_agent_green_phases,
+                "per_agent_yellow_map": per_agent_yellow_map,
+                "lane_capacities": lane_capacities,
+            }
+        finally:
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+
+    @staticmethod
+    def _extract_phase_structure(conn, tls_id: str) -> Tuple[List[int], Dict[int, int]]:
+        """TLS의 첫 번째 program logic에서 green phase 인덱스 + green→다음yellow 매핑 추출.
+
+        2x2grid 예: phases = [G, y, G, y, G, y, G, y]
+          → green_indices = [0, 2, 4, 6]
+          → yellow_map    = {0: 1, 2: 3, 4: 5, 6: 7}
+
+        단일교차로 예: phases = [G, G, G, G, y]
+          → green_indices = [0, 1, 2, 3]
+          → yellow_map    = {3: 4}  (마지막 green→끝의 yellow만 매핑됨)
+            나머지 green→green 전환은 yellow 없이 직접 전환.
+        """
+        logics = list(conn.trafficlight.getAllProgramLogics(tls_id))
+        if not logics:
+            raise RuntimeError(f"TLS '{tls_id}'에 program logic이 없습니다.")
+        phases = list(getattr(logics[0], "phases", []))
+        n = len(phases)
+        if n == 0:
+            raise RuntimeError(f"TLS '{tls_id}'에 phase가 없습니다.")
+
+        def is_green(state: str) -> bool:
+            return 'g' in state.lower()
+
+        def is_yellow(state: str) -> bool:
+            s = state.lower()
+            return 'y' in s and 'g' not in s
+
+        green_indices: List[int] = []
+        yellow_map: Dict[int, int] = {}
+
+        for i, ph in enumerate(phases):
+            state = getattr(ph, "state", "")
+            if not is_green(state):
+                continue
+            green_indices.append(i)
+            # 다음 phase 순회: yellow를 만나면 매핑, green을 만나면 매핑 없음 (직접 전환)
+            for j in range(1, n + 1):
+                next_idx = (i + j) % n
+                next_state = getattr(phases[next_idx], "state", "")
+                if is_green(next_state):
+                    break  # yellow 없이 다음 green이 오는 구조 (single intersection)
+                if is_yellow(next_state):
+                    yellow_map[i] = next_idx
+                    break
+
+        if not green_indices:
+            raise RuntimeError(
+                f"TLS '{tls_id}'에 green phase가 없습니다. "
+                "phase state 문자열에 'G'/'g'가 포함된 phase가 있어야 합니다."
+            )
+        return green_indices, yellow_map
+
+    # ------------------------------------------------------------------
+    # SUMO 연결 시작 / 종료
+    # ------------------------------------------------------------------
+
     def _start_sumo(self, seed: Optional[int] = None) -> None:
         if self.conn is not None:
             self.close()
@@ -225,53 +383,7 @@ class SumoParallelEnv(ParallelEnv):
         ]
         traci.start(cmd, label=self._conn_label)
         self.conn = traci.getConnection(self._conn_label)
-
-        # TLS 존재 얼리 페일: 잘못된 tls_ids는 _find_yellow_phase_index에서 불명확하게
-        # 실패하므로 TraCI 연결 직후 명시적으로 검증
-        known_tls = set(self.conn.trafficlight.getIDList())
-        missing = [tid for tid in self._tls_ids if tid not in known_tls]
-        if missing:
-            raise ValueError(
-                f"SUMO 네트워크에 존재하지 않는 TLS ID: {missing}. "
-                f"사용 가능한 TLS: {sorted(known_tls)}"
-            )
-
-        # 동적 lane 감지 (SUMO-RL 패턴): 네트워크 위상에서 직접 읽어
-        # 하드코딩 없이 임의 SUMO 네트워크(2x2 그리드 등)에서도 동작
-        self._per_agent_lanes = {}
-        self._per_agent_out_lanes = {}
-        for agent in self.possible_agents:
-            tls_id = self._agent_to_tls[agent]
-            # 입력 lane: TLS가 제어하는 모든 lane (중복 제거, 순서 보존)
-            self._per_agent_lanes[agent] = list(dict.fromkeys(
-                self.conn.trafficlight.getControlledLanes(tls_id)
-            ))
-            # 출력 lane: TLS 연결에서 목적지 lane 추출 (pressure 보상 전용)
-            self._per_agent_out_lanes[agent] = list(set(
-                link[0][1]
-                for link in self.conn.trafficlight.getControlledLinks(tls_id)
-                if link
-            ))
-        # 전체 입력 lane 합집합 (queue_cumsum 집계용, 에이전트 간 중복 제거)
-        self._lane_ids = list(dict.fromkeys(
-            ln for agent in self.possible_agents
-            for ln in self._per_agent_lanes[agent]
-        ))
-
-        for agent in self.possible_agents:
-            tls_id = self._agent_to_tls[agent]
-            self._yellow_phase_index[agent] = self._find_yellow_phase_index(tls_id)
-
-    def _find_yellow_phase_index(self, tls_id: str) -> int:
-        for logic in self.conn.trafficlight.getAllProgramLogics(tls_id):
-            for idx, phase in enumerate(getattr(logic, "phases", [])):
-                state = getattr(phase, "state", "").lower()
-                if state and set(state).issubset({"y", "r"}) and "y" in state:
-                    return idx
-        raise RuntimeError(
-            f"TLS '{tls_id}'에서 all-yellow phase를 찾지 못했습니다. "
-            "tls.tll.xml의 phase 구성을 확인하세요."
-        )
+        # lane / phase 스펙은 __init__의 probe 결과를 재사용 (재추출 불필요)
 
     def _simulate_seconds(self, num_seconds: int) -> Tuple[bool, int]:
         """num_seconds만큼 시뮬레이션 진행; (done, 실제_진행_초) 반환"""
@@ -297,8 +409,7 @@ class SumoParallelEnv(ParallelEnv):
                         float(self._latest_waiting.pop(veh_id))
                     )
 
-            # lane별 halting 차량 수: cumsum 누적 + 단일 lane 최대값 추적
-            # (max_queue 는 1 step당 1번만 계산하면 충분 — 동일 루프에서 처리)
+            # lane별 halting cumsum + max_queue 추적
             halting_per_lane = [
                 float(self.conn.lane.getLastStepHaltingNumber(ln))
                 for ln in self._lane_ids
@@ -309,8 +420,6 @@ class SumoParallelEnv(ParallelEnv):
                 if step_max > self._episode_max_queue:
                     self._episode_max_queue = step_max
 
-            # teleport 누적: getStartingTeleportNumber는 "이번 step에 시작된 텔레포트 수"
-            # 네트워크 교착(grid lock) 발생 시 SUMO가 차량을 강제 이동시키는 신호
             self._episode_teleported += int(
                 self.conn.simulation.getStartingTeleportNumber()
             )
@@ -320,18 +429,38 @@ class SumoParallelEnv(ParallelEnv):
 
         return False, num_seconds
 
+    # ------------------------------------------------------------------
+    # Observation
+    # ------------------------------------------------------------------
+
     def _compute_obs(self, agent: str) -> np.ndarray:
-        # agent별 입력 lane 최대 4개 사용 (shape=10 고정 유지)
-        # 4x4 격자처럼 lane이 4개 이상인 경우 앞 4개만, 미만이면 0으로 패딩
-        lanes = self._per_agent_lanes.get(agent, self._lane_ids)[:4]
-        queues = [float(self.conn.lane.getLastStepHaltingNumber(ln)) for ln in lanes]
-        speeds = [max(0.0, float(self.conn.lane.getLastStepMeanSpeed(ln))) for ln in lanes]
-        # 4 lane 미만인 경우 0 패딩
-        queues += [0.0] * (4 - len(queues))
-        speeds += [0.0] * (4 - len(speeds))
-        phase_norm = self._current_phase[agent] / 3.0
-        elapsed_norm = self._elapsed_phase_time[agent] / max(1.0, float(self.min_green))
-        obs = np.array(queues + speeds + [phase_norm, elapsed_norm], dtype=np.float32)
+        """SUMO-RL 표준 형태: [phase_one_hot, min_green_flag, density, queue].
+
+        - phase_one_hot : 현재 green phase의 one-hot 벡터 (length num_green)
+        - min_green_flag: 현재 phase가 min_green 시간 충족했는지 (0 또는 1)
+        - density       : lane별 [현재 차량 수 / lane 용량] (length num_lanes)
+        - queue         : lane별 [halting 차량 수 / lane 용량] (length num_lanes)
+        """
+        lanes = self._per_agent_lanes[agent]
+        green_idx = self._current_green_idx[agent]
+
+        phase_one_hot = np.zeros(self._num_green, dtype=np.float32)
+        phase_one_hot[green_idx] = 1.0
+
+        min_green_flag = np.float32(
+            1.0 if self._elapsed_phase_time[agent] >= self.min_green else 0.0
+        )
+
+        density = np.array([
+            min(1.0, self.conn.lane.getLastStepVehicleNumber(ln) / self._lane_capacities[ln])
+            for ln in lanes
+        ], dtype=np.float32)
+        queue = np.array([
+            min(1.0, self.conn.lane.getLastStepHaltingNumber(ln) / self._lane_capacities[ln])
+            for ln in lanes
+        ], dtype=np.float32)
+
+        obs = np.concatenate([phase_one_hot, [min_green_flag], density, queue])
         self._last_obs[agent] = obs
         return obs
 
@@ -356,31 +485,36 @@ class SumoParallelEnv(ParallelEnv):
         self._queue_cumsum = 0.0
         self._last_wait_measure.clear()
 
-        # 진단 카운터 초기화 (reset마다 0으로)
+        # 진단 카운터 초기화
         self._episode_phase_switches = 0
         self._episode_max_queue = 0.0
         self._episode_action_counts.fill(0)
         self._episode_teleported = 0
 
+        # 초기 phase: 각 agent의 green_phases[0] 으로 강제 설정
         for agent in self.agents:
-            self._current_phase[agent] = 0
+            initial_phase = self._per_agent_green_phases[agent][0]
+            self._current_green_idx[agent] = 0
+            self._current_phase[agent] = initial_phase
             self._elapsed_phase_time[agent] = 0
-            self.conn.trafficlight.setPhase(self._agent_to_tls[agent], 0)
+            self.conn.trafficlight.setPhase(self._agent_to_tls[agent], initial_phase)
 
         observations = {a: self._compute_obs(a) for a in self.agents}
-        infos = {a: {"phase": 0} for a in self.agents}
+        infos = {a: {"phase": self._current_phase[a]} for a in self.agents}
         return observations, infos
 
     def step(self, actions: Dict[str, int]):
-        # 정책 출력 분포 추적 — min_green 미충족으로 실제 적용 안 된 action도 카운트
-        # (실제 적용된 phase는 _episode_phase_switches로 별도 측정)
+        # 1. 정책 출력 분포 추적 — min_green 미충족이라도 출력 자체는 카운트
         for agent in self.agents:
             self._episode_action_counts[int(actions[agent])] += 1
 
-        # min_green 조건 만족 + phase 변경 요청인 에이전트 식별
+        # 2. action → 목표 green phase 인덱스 매핑
+        target_green_idx = {a: int(actions[a]) for a in self.agents}
+
+        # 3. switching 판정: 다른 green을 요청 + min_green 충족
         switching = {
             a: (
-                int(actions[a]) != self._current_phase[a]
+                target_green_idx[a] != self._current_green_idx[a]
                 and self._elapsed_phase_time[a] >= self.min_green
             )
             for a in self.agents
@@ -388,35 +522,44 @@ class SumoParallelEnv(ParallelEnv):
         self._episode_phase_switches += sum(switching.values())
 
         done = False
-        throughput_before = self._throughput  # 스텝 시작 시점 처리량 스냅샷
+        throughput_before = self._throughput
 
-        # 전환 에이전트의 TLS에 yellow 적용
+        # 4. yellow 전환: 현재 green→다음yellow 가 매핑된 agent만 yellow 적용
+        yellow_applied = False
         for agent in self.agents:
-            if switching[agent]:
+            if not switching[agent]:
+                continue
+            current_phase_idx = self._current_phase[agent]
+            yellow_idx = self._per_agent_yellow_map[agent].get(current_phase_idx)
+            if yellow_idx is not None:
                 self.conn.trafficlight.setPhase(
-                    self._agent_to_tls[agent], self._yellow_phase_index[agent]
+                    self._agent_to_tls[agent], yellow_idx
                 )
+                yellow_applied = True
 
-        # yellow 유지 시간 진행
-        if any(switching.values()):
+        if yellow_applied:
             done, _ = self._simulate_seconds(self.yellow_time)
-            if not done:
-                for agent in self.agents:
-                    if switching[agent]:
-                        new_phase = int(actions[agent])
-                        self._current_phase[agent] = new_phase
-                        self._elapsed_phase_time[agent] = 0
-                        self.conn.trafficlight.setPhase(
-                            self._agent_to_tls[agent], new_phase
-                        )
 
-        # delta_time 진행
+        # 5. 목표 green phase 적용
+        if not done:
+            for agent in self.agents:
+                if switching[agent]:
+                    new_green_idx = target_green_idx[agent]
+                    new_phase = self._per_agent_green_phases[agent][new_green_idx]
+                    self._current_green_idx[agent] = new_green_idx
+                    self._current_phase[agent] = new_phase
+                    self._elapsed_phase_time[agent] = 0
+                    self.conn.trafficlight.setPhase(
+                        self._agent_to_tls[agent], new_phase
+                    )
+
+        # 6. delta_time 진행
         if not done:
             done, progressed = self._simulate_seconds(self.delta_time)
             for agent in self.agents:
                 self._elapsed_phase_time[agent] += progressed
 
-        # 에이전트별 결과 계산
+        # 7. 결과 계산
         avg_wait = (
             float(np.mean(self._completed_waiting)) if self._completed_waiting else 0.0
         )
@@ -426,8 +569,6 @@ class SumoParallelEnv(ParallelEnv):
         avg_travel = (
             float(np.mean(self._completed_travel)) if self._completed_travel else 0.0
         )
-
-        # 이번 스텝에서 완료된 차량 수 (delta): _simulate_seconds 내부에서 누적됨
         step_throughput = self._throughput - throughput_before
 
         observations, rewards, terminations, truncations, infos = {}, {}, {}, {}, {}
@@ -435,10 +576,10 @@ class SumoParallelEnv(ParallelEnv):
             obs = self._compute_obs(agent)
             observations[agent] = obs
 
-            # ── 보상 함수 (reward_mode 별 분기) ──────────────────────────────
+            # ── 보상 함수 ─────────────────────────────────────────────
+            lanes = self._per_agent_lanes[agent]
+
             if self.reward_mode == "diff-waiting-time":
-                # 누적 대기시간 변화량: 감소 시 양의 보상 (SUMO-RL 검증 방식)
-                lanes = self._per_agent_lanes.get(agent, self._lane_ids)
                 current_wait = sum(
                     self.conn.lane.getWaitingTime(ln) for ln in lanes
                 ) / 100.0
@@ -446,18 +587,17 @@ class SumoParallelEnv(ParallelEnv):
                 self._last_wait_measure[agent] = current_wait
 
             elif self.reward_mode == "pressure":
-                # 처리량 압력: 출력 lane 차량 수 - 입력 lane 차량 수
-                in_lanes  = self._per_agent_lanes.get(agent, self._lane_ids)
                 out_lanes = self._per_agent_out_lanes.get(agent, [])
                 reward = float(
                     sum(self.conn.lane.getLastStepVehicleNumber(ln) for ln in out_lanes)
-                    - sum(self.conn.lane.getLastStepVehicleNumber(ln) for ln in in_lanes)
+                    - sum(self.conn.lane.getLastStepVehicleNumber(ln) for ln in lanes)
                 )
 
-            else:  # "queue" (default)
-                # mean+max 조합: 기아 방향에 추가 패널티 + 처리량 보너스
-                queue_arr = obs[:4]
-                queue_penalty = (float(np.mean(queue_arr)) + float(np.max(queue_arr))) / 10.0
+            else:  # "queue" (default) — obs 구조가 바뀌어 직접 lane 조회
+                queues = np.array([
+                    self.conn.lane.getLastStepHaltingNumber(ln) for ln in lanes
+                ], dtype=np.float32)
+                queue_penalty = (float(queues.mean()) + float(queues.max())) / 10.0
                 throughput_bonus = step_throughput * 0.5
                 reward = -queue_penalty + throughput_bonus
 
@@ -472,7 +612,6 @@ class SumoParallelEnv(ParallelEnv):
                 "avg_travel_time": avg_travel,
                 "total_queue_length": float(self._queue_cumsum),
                 "throughput": self._throughput,
-                # 진단 지표 (mode collapse / grid lock 감지)
                 "phase_switches": int(self._episode_phase_switches),
                 "max_queue": float(self._episode_max_queue),
                 "teleported": int(self._episode_teleported),
@@ -485,11 +624,6 @@ class SumoParallelEnv(ParallelEnv):
         return observations, rewards, terminations, truncations, infos
 
     def render(self) -> np.ndarray:
-        """
-        matplotlib + sumolib 기반 네트워크 시각화.
-        sumo_renderer.SumoRenderer에 현재 신호 상태를 전달해 RGB 배열 반환.
-        net.xml 로드에 실패한 경우 단일교차로 numpy fallback 사용.
-        """
         return self._renderer.render(
             agent_to_tls=self._agent_to_tls,
             current_phase=self._current_phase,
@@ -513,8 +647,11 @@ if __name__ == "__main__":
     step = 0
     try:
         obs, infos = env.reset(seed=42)
-        print("agents:", env.agents)
-        print("obs shapes:", {a: o.shape for a, o in obs.items()})
+        print(f"agents: {env.agents}")
+        print(f"obs_dim: {env._obs_dim} (num_green={env._num_green}, num_lanes={env._num_lanes})")
+        print(f"obs shapes: {[(a, o.shape) for a, o in obs.items()]}")
+        print(f"green_phases per agent: {env._per_agent_green_phases}")
+        print(f"yellow_map per agent:   {env._per_agent_yellow_map}")
 
         while env.agents:
             actions = {a: env.action_space(a).sample() for a in env.agents}

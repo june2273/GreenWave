@@ -96,16 +96,18 @@ def parse_args():
 
 
 def _action_ratios(action_counts: list) -> dict:
-    """action_counts 리스트 [n0, n1, n2, n3] → 비율 dict {action_k_ratio: ...}.
+    """action_counts 리스트 → 비율 dict {action_k_ratio: ...}.
 
-    mode collapse 진단: 균등 분포에 가까우면 0.25씩, 한쪽 쏠림이면 1.0 근처.
+    길이가 num_green 만큼 가변. mode collapse 진단: 균등 분포에 가까우면
+    1/num_green 씩, 한쪽 쏠림이면 1.0 근처.
     """
     counts = np.asarray(action_counts, dtype=np.float64)
+    n = len(counts)
     total = counts.sum()
     if total <= 0:
-        return {f"action_{i}_ratio": 0.0 for i in range(4)}
+        return {f"action_{i}_ratio": 0.0 for i in range(n)}
     ratios = counts / total
-    return {f"action_{i}_ratio": float(ratios[i]) for i in range(4)}
+    return {f"action_{i}_ratio": float(ratios[i]) for i in range(n)}
 
 
 def _row_from_info(algorithm: str, ep: int, seed: int, info: dict) -> dict:
@@ -123,7 +125,7 @@ def _row_from_info(algorithm: str, ep: int, seed: int, info: dict) -> dict:
         "max_queue":          info.get("max_queue",          np.nan),
         "teleported":         info.get("teleported",         np.nan),
     }
-    row.update(_action_ratios(info.get("action_counts", [0, 0, 0, 0])))
+    row.update(_action_ratios(info.get("action_counts", [])))
     return row
 
 
@@ -169,6 +171,16 @@ def main():
     env_mappo = SumoParallelEnv(**env_kwargs)
     env_fix   = SumoParallelEnv(**env_kwargs)
 
+    # 동적 METRIC_COLS: num_green에 맞춰 action_*_ratio 컬럼 수 조정
+    # (단일·2x2grid 모두 num_green=4 이지만 다른 네트워크 대응)
+    num_green = env_mappo._num_green
+    metric_cols = [
+        "avg_waiting_time", "std_waiting_time", "avg_travel_time",
+        "total_queue_length", "throughput",
+        "phase_switches", "max_queue", "teleported",
+        *[f"action_{i}_ratio" for i in range(num_green)],
+    ]
+
     def mappo_action(obs_dict, step_idx, agents):
         return {
             agent: int(torch.argmax(
@@ -195,12 +207,13 @@ def main():
             info = run_episode(env_mappo, mappo_action, seed=seed)
             rows.append(_row_from_info("MAPPO", ep, seed, info))
             r = rows[-1]
+            act_dist_str = ",".join(f"{r.get(f'action_{j}_ratio', 0.0):.2f}"
+                                    for j in range(num_green))
             print(f"[MAPPO]     ep={ep} seed={seed} | "
                   f"wait={r['avg_waiting_time']:.1f}s | "
                   f"queue={r['total_queue_length']:.0f} | "
                   f"switches={r['phase_switches']:.0f} | "
-                  f"act_dist=[{r['action_0_ratio']:.2f},{r['action_1_ratio']:.2f},"
-                  f"{r['action_2_ratio']:.2f},{r['action_3_ratio']:.2f}] | "
+                  f"act_dist=[{act_dist_str}] | "
                   f"teleport={r['teleported']:.0f}")
 
             # ── FixedTime (동일 seed) ─────────────────────────────────────────
@@ -224,17 +237,17 @@ def main():
         sub = df_raw[df_raw["algorithm"] == algo_name]
         if sub.empty:
             continue
-        means = sub[METRIC_COLS].mean(numeric_only=True)
-        stds  = sub[METRIC_COLS].std(numeric_only=True, ddof=0)
+        means = sub[metric_cols].mean(numeric_only=True)
+        stds  = sub[metric_cols].std(numeric_only=True, ddof=0)
         summary_rows.append({
             "algorithm": f"{algo_name}_mean",
             "episode": "", "seed": "",
-            **{c: means[c] for c in METRIC_COLS},
+            **{c: means[c] for c in metric_cols},
         })
         summary_rows.append({
             "algorithm": f"{algo_name}_std",
             "episode": "", "seed": "",
-            **{c: stds[c] for c in METRIC_COLS},
+            **{c: stds[c] for c in metric_cols},
         })
     df = pd.concat([df_raw, pd.DataFrame(summary_rows)], ignore_index=True)
 
@@ -265,7 +278,7 @@ def main():
     print(f"Train metadata: {'loaded' if train_meta else 'not found (older model)'}")
     print("\n=== Summary (mean ± std) ===")
     for algo_name in ("MAPPO", "FixedTime"):
-        sub = df_raw[df_raw["algorithm"] == algo_name][METRIC_COLS]
+        sub = df_raw[df_raw["algorithm"] == algo_name][metric_cols]
         if sub.empty:
             continue
         print(f"\n[{algo_name}]")

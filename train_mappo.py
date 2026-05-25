@@ -115,42 +115,52 @@ def _build_callback():
         """
 
         def on_episode_end(self, *, episode=None, metrics_logger=None, **kwargs):
-            # 1. 마지막 info 추출 (Ray 버전별 episode API 차이 흡수)
-            last_info = self._extract_last_info(episode)
-            if not last_info:
-                return
+            # 콜백 실패가 학습을 중단시키지 않도록 전체를 try로 감쌈
+            try:
+                last_info = self._extract_last_info(episode)
+                if not last_info:
+                    return
 
-            # 2. metrics_logger (new API) 또는 episode.custom_metrics (old API) 사용
-            self._log_metric(episode, metrics_logger,
-                             "phase_switches", float(last_info.get("phase_switches", 0)))
-            self._log_metric(episode, metrics_logger,
-                             "teleported", float(last_info.get("teleported", 0)))
-            self._log_metric(episode, metrics_logger,
-                             "max_queue", float(last_info.get("max_queue", 0)))
-
-            counts = last_info.get("action_counts", [0, 0, 0, 0])
-            total = sum(counts) or 1
-            for i in range(4):
                 self._log_metric(episode, metrics_logger,
-                                 f"action_{i}_ratio", counts[i] / total)
+                                 "phase_switches", float(last_info.get("phase_switches", 0)))
+                self._log_metric(episode, metrics_logger,
+                                 "teleported", float(last_info.get("teleported", 0)))
+                self._log_metric(episode, metrics_logger,
+                                 "max_queue", float(last_info.get("max_queue", 0)))
+
+                counts = last_info.get("action_counts", [])
+                total = sum(counts) or 1
+                # 4 하드코딩 대신 실제 action 개수 사용 (num_green 가변 대응)
+                for i, c in enumerate(counts):
+                    self._log_metric(episode, metrics_logger,
+                                     f"action_{i}_ratio", c / total)
+            except Exception:
+                # 학습 진행이 최우선 — 메트릭 수집 실패는 silent하게 무시
+                return
 
         @staticmethod
         def _extract_last_info(episode):
-            """MultiAgentEpisode / EpisodeV2 양쪽에서 안전하게 마지막 info 추출."""
+            """MultiAgentEpisode / EpisodeV2 양쪽에서 안전하게 마지막 info 추출.
+
+            Ray 2.10+ MultiAgentEpisode.get_infos() 의 첫 positional 인자는
+            agent_id가 아니라 indices(int) 임. indices=-1 로 마지막 step의 info를
+            {agent_id: info} dict로 받아 첫 non-empty 값을 사용.
+            """
             if episode is None:
                 return None
-            # New API stack (MultiAgentEpisode)
+            # New API stack
             try:
-                agent_ids = list(episode.agent_ids)
-                if agent_ids:
-                    infos = episode.get_infos(agent_ids[0])
-                    if infos:
-                        return infos[-1]
-            except (AttributeError, TypeError):
+                infos = episode.get_infos(indices=-1)
+                if isinstance(infos, dict):
+                    for info in infos.values():
+                        if info:
+                            return info
+                elif isinstance(infos, list) and infos:
+                    return infos[0]
+            except (AssertionError, AttributeError, TypeError, IndexError, KeyError):
                 pass
-            # Old API stack (EpisodeV2)
+            # Old API stack
             try:
-                # 어느 agent든 동일한 episode-level info를 반환
                 for aid in ("tl_0", "tl_1", "tl_2", "tl_3"):
                     info = episode.last_info_for(aid)
                     if info:
@@ -225,11 +235,20 @@ def main():
     if args.sumo_cfg:
         env_config["sumo_cfg"] = args.sumo_cfg
 
-    # shared policy 스펙 정의 (obs/act space는 모든 에이전트 동일)
-    obs_space = spaces.Box(
-        low=0.0, high=np.finfo(np.float32).max, shape=(10,), dtype=np.float32
-    )
-    act_space = spaces.Discrete(4)
+    # ── obs/act space 동적 결정 ─────────────────────────────────────────
+    # 네트워크별로 controlled lanes 수와 green phase 수가 다르므로 (단일=8 lanes,
+    # 2x2grid=12 lanes) 임시 probe env를 생성해 실제 space를 추출.
+    # SumoParallelEnv.__init__ 가 내부적으로 1회 SUMO probe를 수행하므로
+    # 여기서 환경 객체만 만들면 즉시 spec을 얻을 수 있음.
+    probe_env = SumoParallelEnv(**env_config)
+    probe_agent = probe_env.possible_agents[0]
+    obs_space = probe_env.observation_space(probe_agent)
+    act_space = probe_env.action_space(probe_agent)
+    # 후속 TB 로깅에서 action_{i}_ratio 키 가변 생성에 사용
+    num_green = probe_env._num_green
+    print(f"환경 spec | obs={obs_space.shape} (num_green={num_green}, "
+          f"num_lanes={probe_env._num_lanes}) | act=Discrete({num_green})")
+    probe_env.close()
 
     # 하이퍼파라미터 — 한 곳에 모아두고 메타데이터에도 동일하게 기록
     hparams = dict(
@@ -333,9 +352,8 @@ def main():
             # new API stack: env_stats 하위에 평탄화되어 들어옴
             # old API stack: env_stats["custom_metrics"]["<key>_mean"] 형태
             custom = env_stats.get("custom_metrics", {})
-            for k in ("phase_switches", "teleported", "max_queue",
-                      "action_0_ratio", "action_1_ratio",
-                      "action_2_ratio", "action_3_ratio"):
+            action_keys = tuple(f"action_{j}_ratio" for j in range(num_green))
+            for k in ("phase_switches", "teleported", "max_queue") + action_keys:
                 # 후보 키 순회: 정확한 키 우선, 이후 _mean 변형
                 val = env_stats.get(k, env_stats.get(f"{k}_mean",
                        custom.get(f"{k}_mean", custom.get(k))))
