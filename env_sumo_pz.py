@@ -141,6 +141,11 @@ class SumoParallelEnv(ParallelEnv):
         self._last_obs: Dict[str, np.ndarray] = {
             a: np.zeros(self._obs_dim, dtype=np.float32) for a in self.possible_agents
         }
+        # 렌더러 전용 lane별 큐 캐시 (agent → [queue per lane])
+        # step()/reset()에서 갱신. SumoRenderer가 obs 의존 없이 정확한 큐 사용.
+        self._last_queue_per_lane: Dict[str, List[float]] = {
+            a: [0.0] * len(self._per_agent_lanes[a]) for a in self.possible_agents
+        }
 
         # TraCI 연결
         self.conn = None
@@ -451,13 +456,19 @@ class SumoParallelEnv(ParallelEnv):
             1.0 if self._elapsed_phase_time[agent] >= self.min_green else 0.0
         )
 
+        # lane별 raw queue 1회 조회 → 캐시 + obs 정규화 양쪽에 재사용 (traci 호출 절약)
+        raw_queue = [
+            float(self.conn.lane.getLastStepHaltingNumber(ln)) for ln in lanes
+        ]
+        self._last_queue_per_lane[agent] = raw_queue
+
         density = np.array([
             min(1.0, self.conn.lane.getLastStepVehicleNumber(ln) / self._lane_capacities[ln])
             for ln in lanes
         ], dtype=np.float32)
         queue = np.array([
-            min(1.0, self.conn.lane.getLastStepHaltingNumber(ln) / self._lane_capacities[ln])
-            for ln in lanes
+            min(1.0, q / self._lane_capacities[ln])
+            for ln, q in zip(lanes, raw_queue)
         ], dtype=np.float32)
 
         obs = np.concatenate([phase_one_hot, [min_green_flag], density, queue])
@@ -616,6 +627,8 @@ class SumoParallelEnv(ParallelEnv):
                 "max_queue": float(self._episode_max_queue),
                 "teleported": int(self._episode_teleported),
                 "action_counts": self._episode_action_counts.tolist(),
+                # 렌더러/디버깅용 — agent별 controlled lane 순서대로의 halting 차량 수
+                "queue_per_lane": list(self._last_queue_per_lane[agent]),
             }
 
         if done:
@@ -630,6 +643,11 @@ class SumoParallelEnv(ParallelEnv):
             last_obs=self._last_obs,
             sim_step=self.sim_step,
             max_steps=self.max_steps,
+            # 정확한 큐 시각화를 위한 lane별 raw halting 차량 수 + lane id 매핑
+            # obs 가 [phase_one_hot, density, queue] 구조로 바뀐 후 obs[:4] 가
+            # 큐가 아니게 되어 추가됨 (SumoRenderer 옵션 B 큐 막대 정확화)
+            queue_per_lane=self._last_queue_per_lane,
+            lane_ids=self._per_agent_lanes,
         )
 
     def close(self):
