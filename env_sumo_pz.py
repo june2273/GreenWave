@@ -375,6 +375,24 @@ class SumoParallelEnv(ParallelEnv):
     # SUMO 연결 시작 / 종료
     # ------------------------------------------------------------------
 
+    # 자동 cycle 차단 시 사용하는 매우 큰 phase duration (사실상 영구)
+    # 학습 1 episode = 3600 sim sec << 100000 → 자동 phase 진행 발생 안 함
+    _PHASE_DURATION_LOCK = 100000.0
+
+    def _set_phase_locked(self, tls_id: str, phase_idx: int) -> None:
+        """setPhase + 자동 cycle 차단 (D2 솔루션).
+
+        SUMO TLS program 은 setPhase 호출 후에도 phase duration 만료 시 자동으로
+        다음 phase 로 진행한다 (e.g. 2x2grid 의 phase 0 duration=33s → 33초 후
+        SUMO 가 자동으로 phase 1 yellow 로 전환). 이는 agent 의 의도와 무관한
+        phase 전환을 유발하여 학습 신호를 노이즈화한다.
+
+        해결: setPhase 직후 phase duration 을 100000s 로 강제 → 자동 진행 차단.
+              agent action 으로 setPhase 가 다시 호출될 때까지 phase 유지.
+        """
+        self.conn.trafficlight.setPhase(tls_id, phase_idx)
+        self.conn.trafficlight.setPhaseDuration(tls_id, self._PHASE_DURATION_LOCK)
+
     def _start_sumo(self, seed: Optional[int] = None) -> None:
         if self.conn is not None:
             self.close()
@@ -502,13 +520,13 @@ class SumoParallelEnv(ParallelEnv):
         self._episode_action_counts.fill(0)
         self._episode_teleported = 0
 
-        # 초기 phase: 각 agent의 green_phases[0] 으로 강제 설정
+        # 초기 phase: 각 agent의 green_phases[0] 으로 강제 설정 (자동 cycle 차단)
         for agent in self.agents:
             initial_phase = self._per_agent_green_phases[agent][0]
             self._current_green_idx[agent] = 0
             self._current_phase[agent] = initial_phase
             self._elapsed_phase_time[agent] = 0
-            self.conn.trafficlight.setPhase(self._agent_to_tls[agent], initial_phase)
+            self._set_phase_locked(self._agent_to_tls[agent], initial_phase)
 
         observations = {a: self._compute_obs(a) for a in self.agents}
         infos = {a: {"phase": self._current_phase[a]} for a in self.agents}
@@ -543,9 +561,7 @@ class SumoParallelEnv(ParallelEnv):
             current_phase_idx = self._current_phase[agent]
             yellow_idx = self._per_agent_yellow_map[agent].get(current_phase_idx)
             if yellow_idx is not None:
-                self.conn.trafficlight.setPhase(
-                    self._agent_to_tls[agent], yellow_idx
-                )
+                self._set_phase_locked(self._agent_to_tls[agent], yellow_idx)
                 yellow_applied = True
 
         if yellow_applied:
@@ -560,9 +576,7 @@ class SumoParallelEnv(ParallelEnv):
                     self._current_green_idx[agent] = new_green_idx
                     self._current_phase[agent] = new_phase
                     self._elapsed_phase_time[agent] = 0
-                    self.conn.trafficlight.setPhase(
-                        self._agent_to_tls[agent], new_phase
-                    )
+                    self._set_phase_locked(self._agent_to_tls[agent], new_phase)
 
         # 6. delta_time 진행
         if not done:
@@ -591,9 +605,11 @@ class SumoParallelEnv(ParallelEnv):
             lanes = self._per_agent_lanes[agent]
 
             if self.reward_mode == "diff-waiting-time":
+                # B1: 정규화 /100 → /10 — reward magnitude 10배 ↑로 VF 학습 신호 강화
+                # (free flow 에선 ~0.5, 정체에선 ~5+ 범위가 되어 VF variance 확보)
                 current_wait = sum(
                     self.conn.lane.getWaitingTime(ln) for ln in lanes
-                ) / 100.0
+                ) / 10.0
                 reward = self._last_wait_measure.get(agent, current_wait) - current_wait
                 self._last_wait_measure[agent] = current_wait
 

@@ -209,6 +209,13 @@ def parse_args():
                         "diff-waiting-time: 대기시간 변화량, pressure: 처리량 차이)")
     p.add_argument("--sumo-cfg", type=str, default=None,
                    help="SUMO 설정 파일 경로 (미지정 시 기본 단일교차로 사용)")
+    p.add_argument("--traffic", type=str, default="default",
+                   choices=["default", "high"],
+                   help="2x2grid 트래픽 강도 사전셋 ("
+                        "default: 원본 sumo-rl routes (~0.4대/초, free flow), "
+                        "high: routes_2x2_dense (~1.4대/초, 정체). "
+                        "high 선택 시 --sumo-cfg 미지정이면 2x2grid_dense.sumocfg 자동 사용. "
+                        "--sumo-cfg 명시 시 그것이 우선.)")
     return p.parse_args()
 
 
@@ -223,6 +230,16 @@ def main():
     register_env("sumo_pz", _make_env)
     ray.init(ignore_reinit_error=True)
 
+    # --traffic high + --sumo-cfg 미지정 시 자동으로 dense sumocfg 사용
+    # --sumo-cfg 명시 시 그것이 우선 (사용자가 직접 routes 지정한 경우 존중)
+    sumo_cfg_effective = args.sumo_cfg
+    if args.traffic == "high" and not sumo_cfg_effective:
+        sumo_cfg_effective = str(
+            (Path(__file__).resolve().parent
+             / "sumo_data" / "2x2grid_dense.sumocfg").resolve()
+        )
+        print(f"[traffic=high] sumo_cfg 자동 사용: {sumo_cfg_effective}")
+
     env_config = {
         "use_gui": False,
         "delta_time": args.delta_time,
@@ -232,8 +249,8 @@ def main():
         "tls_ids": args.tls_ids,
         "reward_mode": args.reward_mode,
     }
-    if args.sumo_cfg:
-        env_config["sumo_cfg"] = args.sumo_cfg
+    if sumo_cfg_effective:
+        env_config["sumo_cfg"] = sumo_cfg_effective
 
     # ── obs/act space 동적 결정 ─────────────────────────────────────────
     # 네트워크별로 controlled lanes 수와 green phase 수가 다르므로 (단일=8 lanes,
@@ -251,17 +268,24 @@ def main():
     probe_env.close()
 
     # 하이퍼파라미터 — 한 곳에 모아두고 메타데이터에도 동일하게 기록
+    # 변경 이력 (MAPPO_sumo_11 부터):
+    #   (B4) entropy_coeff   0.02  → 0.005  — reward magnitude 와 균형 맞춤
+    #                                          (이전엔 entropy bonus 가 reward 신호와
+    #                                          동일 스케일이라 exploration 편향 과도)
+    #   (A3) vf_clip_param   500.0 → 10.0   — diff-waiting-time reward 스케일에 맞춤
+    #                                          (이전 500 은 사실상 clip 작동 안 함)
+    #   (C4) train_batch_size 4000 → 8000   — gradient noise variance 감소 (∝ 1/N)
     hparams = dict(
         lr=1e-4,
         gamma=0.99,
-        train_batch_size=4000,
+        train_batch_size=8000,    # C4: 4000 → 8000
         num_epochs=6,
         minibatch_size=128,
         lambda_=0.95,
         clip_param=0.2,
         vf_loss_coeff=0.5,
-        entropy_coeff=0.02,
-        vf_clip_param=500.0,
+        entropy_coeff=0.005,      # B4: 0.02 → 0.005
+        vf_clip_param=10.0,       # A3: 500 → 10 (reward 스케일에 맞춤)
     )
 
     config = (
@@ -302,7 +326,8 @@ def main():
         "delta_time":   args.delta_time,
         "min_green":    args.min_green,
         "yellow_time":  args.yellow_time,
-        "sumo_cfg":     args.sumo_cfg,
+        "sumo_cfg":     sumo_cfg_effective,
+        "traffic":      args.traffic,
         # 학습 중 갱신됨
         "train_iter":        0,
         "train_total_steps": 0,

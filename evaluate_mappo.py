@@ -92,6 +92,10 @@ def parse_args():
                    help="학습 시 사용한 보상 모드 (train_mappo.py와 일치해야 함)")
     p.add_argument("--sumo-cfg", type=str, default=None,
                    help="SUMO 설정 파일 경로 (학습 시와 동일하게 지정)")
+    p.add_argument("--traffic", type=str, default="default",
+                   choices=["default", "high"],
+                   help="2x2grid 트래픽 강도 사전셋 (train_mappo.py 와 동일 의미). "
+                        "high 선택 시 --sumo-cfg 미지정이면 2x2grid_dense.sumocfg 자동 사용.")
     return p.parse_args()
 
 
@@ -153,6 +157,15 @@ def main():
     # 모델 학습 메타데이터 (없으면 빈 dict) — CSV 모든 행에 prefix로 부착
     train_meta = _load_train_metadata(args.model)
 
+    # --traffic high + --sumo-cfg 미지정 → dense sumocfg 자동 사용
+    sumo_cfg_effective = args.sumo_cfg
+    if args.traffic == "high" and not sumo_cfg_effective:
+        sumo_cfg_effective = str(
+            (Path(__file__).resolve().parent
+             / "sumo_data" / "2x2grid_dense.sumocfg").resolve()
+        )
+        print(f"[traffic=high] sumo_cfg 자동 사용: {sumo_cfg_effective}")
+
     env_kwargs = dict(
         use_gui=False,
         delta_time=args.delta_time,
@@ -162,8 +175,8 @@ def main():
         tls_ids=args.tls_ids,
         reward_mode=args.reward_mode,
     )
-    if args.sumo_cfg:
-        env_kwargs["sumo_cfg"] = args.sumo_cfg
+    if sumo_cfg_effective:
+        env_kwargs["sumo_cfg"] = sumo_cfg_effective
 
     rows = []
 
@@ -264,6 +277,7 @@ def main():
         "train_seed":        train_meta.get("seed", ""),
         "tls_ids":           "_".join(args.tls_ids),
         "num_workers":       train_meta.get("num_workers", ""),
+        "traffic":           train_meta.get("traffic", args.traffic),
     }
     for k, v in meta_prefix.items():
         df.insert(0, k, v)
