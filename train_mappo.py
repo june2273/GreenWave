@@ -413,10 +413,32 @@ def main():
         print(f"\n학습 완료. 최종 checkpoint: {final_ckpt}")
         print(f"메타데이터: {out_path}/train_metadata.json")
     finally:
-        tb_writer.close()
-        algo.stop()
-        ray.shutdown()
+        # 각 cleanup 을 독립적으로 try/except — 하나가 hang/실패해도 다음 진행
+        for cleanup_fn, name in (
+            (tb_writer.close,  "tb_writer.close"),
+            (algo.stop,        "algo.stop"),
+            (ray.shutdown,     "ray.shutdown"),
+        ):
+            try:
+                cleanup_fn()
+            except Exception as e:
+                print(f"[cleanup warning] {name}: {type(e).__name__}: {e}")
 
 
 if __name__ == "__main__":
-    main()
+    # Ray 2.10+ 의 잔존 worker actor / SUMO 좀비 프로세스가 Python interpreter
+    # 종료를 지연시켜 "학습 완료 후 무한 hang" 으로 보이는 문제를 방지.
+    # main() 의 finally 에서 정상 cleanup 시도 완료 후, os._exit() 로
+    # 모든 자식 프로세스 및 background thread 를 즉시 종료.
+    exit_code = 0
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("\n학습 중단 (KeyboardInterrupt)")
+        exit_code = 130  # 128 + SIGINT(2) — POSIX 관례
+    except Exception as e:
+        print(f"\n학습 실패: {type(e).__name__}: {e}")
+        exit_code = 1
+    finally:
+        import os
+        os._exit(exit_code)

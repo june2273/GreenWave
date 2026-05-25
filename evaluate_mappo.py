@@ -57,15 +57,6 @@ except ImportError:
     from env_sumo_pz import SumoParallelEnv
 
 
-# CSV 메트릭 컬럼 (raw 측정값 + 진단 지표)
-METRIC_COLS = [
-    "avg_waiting_time", "std_waiting_time", "avg_travel_time",
-    "total_queue_length", "throughput",
-    "phase_switches", "max_queue", "teleported",
-    "action_0_ratio", "action_1_ratio", "action_2_ratio", "action_3_ratio",
-]
-
-
 def _make_env(config: dict) -> ParallelPettingZooEnv:
     return ParallelPettingZooEnv(SumoParallelEnv(**config))
 
@@ -238,10 +229,17 @@ def main():
                   f"queue={r['total_queue_length']:.0f} | "
                   f"teleport={r['teleported']:.0f}")
     finally:
-        env_mappo.close()
-        env_fix.close()
-        algo.stop()
-        ray.shutdown()
+        # 각 cleanup 독립 실행 — Ray 2.10+ algo.stop()/ray.shutdown() hang 회피
+        for cleanup_fn, name in (
+            (env_mappo.close, "env_mappo.close"),
+            (env_fix.close,   "env_fix.close"),
+            (algo.stop,       "algo.stop"),
+            (ray.shutdown,    "ray.shutdown"),
+        ):
+            try:
+                cleanup_fn()
+            except Exception as e:
+                print(f"[cleanup warning] {name}: {type(e).__name__}: {e}")
 
     # ── 요약 행 추가 (algorithm별 mean / std) ─────────────────────────────
     df_raw = pd.DataFrame(rows)
@@ -304,4 +302,17 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    # Ray 2.10+ 의 잔존 worker actor 가 Python interpreter 종료를 지연시키는
+    # 문제 방지 — main() finally 의 cleanup 후 os._exit 으로 강제 종료
+    exit_code = 0
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("\n평가 중단 (KeyboardInterrupt)")
+        exit_code = 130
+    except Exception as e:
+        print(f"\n평가 실패: {type(e).__name__}: {e}")
+        exit_code = 1
+    finally:
+        import os
+        os._exit(exit_code)

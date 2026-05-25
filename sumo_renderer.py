@@ -112,43 +112,6 @@ class SumoRenderer:
         BW   = sz * 0.013   # 큐 막대 너비
         return IO, RA, RI, BLEN, BW, (xmin, ymin, xmax, ymax)
 
-    # ── 실제 접근 방향 계산 (sumolib geometry) ─────────────────────────────────
-
-    def _get_approach_dirs(self, agent_to_tls: Dict[str, str]) -> Dict[str, list]:
-        """
-        각 TLS의 입력 edge 위치에서 접근 방향 추정.
-        from_node가 junction 기준 어느 방향에 있는지로 N/S/E/W 판별.
-
-        Returns: {agent: ['N','S','E','W'순서_리스트]} (obs[0..3] 에 대응)
-        인식 불가능한 경우 fallback ['?','?','?','?'] 반환.
-        """
-        result: Dict[str, list] = {}
-        if self._net is None:
-            return result
-        _DIR_VEC = {"N": (0, 1), "S": (0, -1), "E": (1, 0), "W": (-1, 0)}
-
-        for agent, tls_id in agent_to_tls.items():
-            try:
-                node = self._net.getNode(tls_id)
-                jx, jy = node.getCoord()
-                dirs: list = []
-                for edge in node.getIncoming():
-                    if edge.getFunction() == "internal":
-                        continue
-                    fx, fy = edge.getFromNode().getCoord()
-                    if abs(fy - jy) > abs(fx - jx):
-                        d = "N" if fy > jy else "S"
-                    else:
-                        d = "E" if fx > jx else "W"
-                    for _ in edge.getLanes():   # lane 수만큼 반복
-                        dirs.append(d)
-                while len(dirs) < 4:
-                    dirs.append("?")
-                result[agent] = dirs[:4]
-            except Exception:
-                result[agent] = ["?", "?", "?", "?"]
-        return result
-
     # ── Phase → 활성 방향 매핑 (옵션 B: net.xml 직접 파싱) ─────────────────────
 
     def _build_phase_directions(self) -> Dict[str, Dict[int, Dict]]:
@@ -370,9 +333,6 @@ class SumoRenderer:
 
         IO, RA, RI, BLEN, BW, (xmin, ymin, xmax, ymax) = self._scale()
 
-        # obs[i] → 실제 접근 방향 계산 (sumolib geometry)
-        approach_dirs = self._get_approach_dirs(agent_to_tls)
-
         # ── 도로 ──────────────────────────────────────────────────────────────
         for edge in self._net.getEdges():
             pts = edge.getShape()
@@ -461,21 +421,16 @@ class SumoRenderer:
                             zorder=5, markeredgewidth=0)
 
             # ── ② 큐 막대 ────────────────────────────────────────────────────
-            # 우선순위 1: env 가 전달한 lane별 raw 큐 (정확) → controlled lanes
-            #             전체 (8 또는 12개) 모두 반영
-            # 우선순위 2: legacy fallback (obs[:4]) — 단일교차로 구버전 호환용
-            #
-            # 같은 방향에 직진/좌회전 lane이 모두 있는 경우 라벨에 분리 표시.
-            #   dir_queue       : {dir: total_q}                  (막대 길이)
-            #   dir_by_movement : {dir: {movement: q}}            (라벨 분리)
+            # env 가 전달한 lane별 raw 큐를 (방향, movement) 별로 집계.
+            #   dir_queue       : {dir: total_q}        (막대 길이 — 같은 방향 합산)
+            #   dir_by_movement : {dir: {mov: q}}       (라벨 분리 — 직진/좌회전 등)
             _DVEC = {"N": (0,1), "S": (0,-1), "E": (1,0), "W": (-1,0)}
             dir_queue: Dict[str, float] = {}
             dir_by_movement: Dict[str, Dict[str, float]] = {}
 
             if queue_per_lane is not None and agent in queue_per_lane:
-                # 정확 경로: lane id 와 큐를 1:1 매칭
-                qs    = queue_per_lane[agent]
-                lns   = lane_ids[agent] if (lane_ids and agent in lane_ids) else []
+                qs  = queue_per_lane[agent]
+                lns = lane_ids[agent] if (lane_ids and agent in lane_ids) else []
                 for ln, q in zip(lns, qs):
                     adir = self._cached_lane_dir(ln, nid)
                     if adir not in self.DIRS:
@@ -484,13 +439,8 @@ class SumoRenderer:
                     dir_queue[adir] = dir_queue.get(adir, 0.0) + float(q)
                     bucket = dir_by_movement.setdefault(adir, {})
                     bucket[amov] = bucket.get(amov, 0.0) + float(q)
-            else:
-                # legacy fallback: obs[:4] = 첫 4개 lane의 queue (구버전 obs 구조)
-                lane_dirs = approach_dirs.get(agent, [])
-                for obs_i, q in enumerate(obs[:4].tolist()):
-                    adir = lane_dirs[obs_i] if obs_i < len(lane_dirs) else "?"
-                    if adir != "?":
-                        dir_queue[adir] = dir_queue.get(adir, 0.0) + float(q)
+            # queue_per_lane 미전달 시 큐 막대 미표시 (외부 호출자가 env.render() 사용 시
+            # 항상 전달됨; 직접 SumoRenderer 사용 시에만 None 일 수 있음)
 
             for adir, queue in dir_queue.items():
                 adx, ady = _DVEC.get(adir, (0, 0))
@@ -607,7 +557,7 @@ class SumoRenderer:
         w, h = canvas.get_width_height()
         return buf.reshape(h, w, 4)[:, :, :3].copy()
 
-    # ── Fallback ───────────────────────────────────────────────────────────────
+    # ── Fallback (net 로드 실패 시 빈 frame + 에러 메시지) ─────────────────────
 
     def _render_fallback(
         self,
@@ -615,24 +565,15 @@ class SumoRenderer:
         last_obs: Dict[str, np.ndarray],
         agents: List[str],
     ) -> np.ndarray:
-        agent = agents[0] if agents else "tl_0"
-        obs   = last_obs.get(agent, np.zeros(10, dtype=np.float32))
-        phase = current_phase.get(agent, 0)
-        h, w  = 480, 640
-        frame = np.full((h, w, 3), 245, dtype=np.uint8)
-        frame[180:300, :]        = 210
-        frame[:, 260:380]        = 210
-        frame[190:290, 270:370]  = 175
-        active   = np.array([50, 180, 75],  dtype=np.uint8)
-        inactive = np.array([200, 80, 70],  dtype=np.uint8)
-        qn = min(int(obs[0] * 6), 150)
-        qs = min(int(obs[1] * 6), 150)
-        qe = min(int(obs[2] * 6), 150)
-        qw = min(int(obs[3] * 6), 150)
-        frame[max(20, 170 - qn):170,         300:340] = active if phase == 0 else inactive
-        frame[310:min(460, 310 + qs),         300:340] = active if phase == 1 else inactive
-        frame[220:260, 390:min(620, 390 + qe)]         = active if phase == 2 else inactive
-        frame[220:260, max(20, 250 - qw):250]          = active if phase == 3 else inactive
+        """net.xml 로드 실패 시 단순 안내 frame 반환 (sumolib 미설치 등 예외 상황)."""
+        h, w = 480, 640
+        frame = np.full((h, w, 3), 30, dtype=np.uint8)  # 어두운 회색 배경
+        # 빨간 X 표시 (대각선)
+        for i in range(min(h, w)):
+            y, x = i * h // min(h, w), i * w // min(h, w)
+            if 0 <= y < h and 0 <= x < w:
+                frame[max(0, y-1):y+2, max(0, x-1):x+2] = [200, 50, 50]
+                frame[max(0, y-1):y+2, max(0, w-x-1):w-x+2] = [200, 50, 50]
         return frame
 
 

@@ -127,9 +127,16 @@ def main():
             if args.mode == "short":
                 frames.append(env.render())
     finally:
-        env.close()
-        algo.stop()
-        ray.shutdown()
+        # 각 cleanup 독립 실행 — Ray 2.10+ algo.stop()/ray.shutdown() hang 회피
+        for cleanup_fn, name in (
+            (env.close,    "env.close"),
+            (algo.stop,    "algo.stop"),
+            (ray.shutdown, "ray.shutdown"),
+        ):
+            try:
+                cleanup_fn()
+            except Exception as e:
+                print(f"[cleanup warning] {name}: {type(e).__name__}: {e}")
 
     output = args.output or _versioned_output(args.model, "videos/mappo_policy_rollout", ".mp4")
     out_path = Path(output)
@@ -141,4 +148,17 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    # Ray 2.10+ 의 잔존 worker actor / SUMO 좀비 프로세스가 Python interpreter
+    # 종료를 지연시켜 "비디오 저장 후 무한 hang" 으로 보이는 문제 방지
+    exit_code = 0
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("\n비디오 녹화 중단 (KeyboardInterrupt)")
+        exit_code = 130
+    except Exception as e:
+        print(f"\n비디오 녹화 실패: {type(e).__name__}: {e}")
+        exit_code = 1
+    finally:
+        import os
+        os._exit(exit_code)
