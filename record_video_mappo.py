@@ -46,7 +46,14 @@ def parse_args():
     p.add_argument("--output", type=str, default=None,
                    help="저장 경로 (미지정 시 --model 버전 번호로 자동 생성, "
                         "예: videos/mappo_policy_rollout_4.mp4)")
-    p.add_argument("--fps", type=int, default=5)
+    p.add_argument("--fps", type=int, default=30,
+                   help="비디오 재생 fps. continuous 모드는 30fps 권장 "
+                        "(1 sim sec → 1 frame → 30 배속). short 모드는 5~10fps.")
+    p.add_argument("--mode", type=str, default="continuous",
+                   choices=["short", "continuous"],
+                   help="short: env.step() 마다 1 frame (요약, 720 frame). "
+                        "continuous: 매 sim step 마다 1 frame (자연스러운 흐름, "
+                        "yellow phase 포착, ~3600 frame).")
     p.add_argument("--max-steps", type=int, default=1200)
     p.add_argument("--delta-time", type=int, default=5)
     p.add_argument("--min-green", type=int, default=10)
@@ -58,6 +65,10 @@ def parse_args():
                    help="학습 시 사용한 보상 모드 (train_mappo.py와 일치해야 함)")
     p.add_argument("--sumo-cfg", type=str, default=None,
                    help="SUMO 설정 파일 경로 (학습 시와 동일하게 지정)")
+    p.add_argument("--traffic", type=str, default="default",
+                   choices=["default", "high"],
+                   help="2x2grid 트래픽 강도 사전셋 (default/high). "
+                        "high 선택 시 --sumo-cfg 미지정이면 2x2grid_dense.sumocfg 자동 사용.")
     return p.parse_args()
 
 
@@ -69,6 +80,15 @@ def main():
     algo = PPO.from_checkpoint(str(Path(args.model).resolve()))
     module = algo.get_module("shared_policy")
 
+    # --traffic high + --sumo-cfg 미지정 → dense sumocfg 자동
+    sumo_cfg_effective = args.sumo_cfg
+    if args.traffic == "high" and not sumo_cfg_effective:
+        sumo_cfg_effective = str(
+            (Path(__file__).resolve().parent
+             / "sumo_data" / "2x2grid_dense.sumocfg").resolve()
+        )
+        print(f"[traffic=high] sumo_cfg 자동 사용: {sumo_cfg_effective}")
+
     env_kwargs = dict(
         use_gui=False,
         delta_time=args.delta_time,
@@ -78,13 +98,19 @@ def main():
         tls_ids=args.tls_ids,
         reward_mode=args.reward_mode,
     )
-    if args.sumo_cfg:
-        env_kwargs["sumo_cfg"] = args.sumo_cfg
+    if sumo_cfg_effective:
+        env_kwargs["sumo_cfg"] = sumo_cfg_effective
     env = SumoParallelEnv(**env_kwargs)
 
     try:
         obs_dict, _ = env.reset(seed=args.seed)
         frames = [env.render()]  # 초기 상태 프레임 포함
+
+        # continuous 모드: env._simulate_seconds 가 매 sim step 후 호출하는 hook 등록
+        # → env.step() 한 번에 (yellow_time + delta_time) sim step 동안 매초 frame 캡쳐
+        # → yellow phase, 큐 누적/감소, 신호 전환이 모두 자연스러운 흐름으로 보임
+        if args.mode == "continuous":
+            env.add_step_hook(lambda sim_step: frames.append(env.render()))
 
         while env.agents:
             actions = {
@@ -97,7 +123,9 @@ def main():
                 for agent in env.agents
             }
             obs_dict, _, _, _, _ = env.step(actions)
-            frames.append(env.render())
+            # short 모드만 env.step() 후 명시적 frame 추가 (continuous 는 hook 이 담당)
+            if args.mode == "short":
+                frames.append(env.render())
     finally:
         env.close()
         algo.stop()
@@ -107,7 +135,9 @@ def main():
     out_path = Path(output)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     imageio.mimsave(out_path, frames, fps=args.fps)
-    print(f"Saved video: {out_path}  ({len(frames)} frames @ {args.fps}fps)")
+    duration = len(frames) / max(1, args.fps)
+    print(f"Saved video: {out_path}  ({len(frames)} frames @ {args.fps}fps, "
+          f"~{duration:.1f}s, mode={args.mode})")
 
 
 if __name__ == "__main__":

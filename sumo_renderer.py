@@ -46,13 +46,20 @@ class SumoRenderer:
     BG_COLOR     = "#0d1117"
     ROAD_COLOR   = "#2c3047"
     NODE_COLOR   = "#4a4a6a"
-    ACTIVE_CLR   = "#00e676"
-    INACTIVE_CLR = "#c62828"
+    ACTIVE_CLR   = "#00e676"      # green light
+    YELLOW_CLR   = "#ffca28"      # yellow light (P4 신규)
+    INACTIVE_CLR = "#c62828"      # red light
     CTR_BG_CLR   = "#1a1a3a"
 
     DIRS    = ["N", "S", "E", "W"]
     DIR_VEC = [(0, 1), (0, -1), (1, 0), (-1, 0)]
-    DIR_ARR = ["^", "v", ">", "<"]
+    DIR_ARR = ["^", "v", ">", "<"]    # 진입 방향 화살표 (차가 그 방향에서 옴)
+
+    # 좌회전 시 출구 방향 (진입 → 좌회전 후 어디로 가는가, 우교차로 기준)
+    # N에서 진입 후 좌회전 → W로 감, 등등
+    _LEFT_TURN_EXIT = {"N": "W", "S": "E", "E": "N", "W": "S"}
+    # 방향 → marker (가려는 방향 화살표)
+    _DIR_TO_MARKER  = {"N": "^",  "S": "v",  "E": ">",  "W": "<"}
 
     def __init__(self, sumo_cfg_path: str | Path) -> None:
         self.sumo_cfg = Path(sumo_cfg_path).resolve()
@@ -224,31 +231,36 @@ class SumoRenderer:
 
             phase_dict: Dict[int, Dict] = {}
             for phase_idx, state in enumerate(phase_states):
-                active_dirs: set = set()
+                green_dirs: set = set()
+                yellow_dirs: set = set()
                 active_movements: set = set()
                 for i, ch in enumerate(state):
                     if i >= len(lane_info):
                         break
-                    # 'G'(우선권 있음) + 'g'(우선권 양보) 모두 활성으로 간주
+                    d, m = lane_info[i]
+                    # 'G'/'g' → green (우선권 있음/양보 모두 활성)
                     if ch in ("G", "g"):
-                        d, m = lane_info[i]
                         if d in self.DIRS:
-                            active_dirs.add(d)
+                            green_dirs.add(d)
                         if m != "?":
                             active_movements.add(m)
-                # movement 라벨: 단일이면 그것, 여러개면 "+" join (사용자 인지)
-                # 예: phase 0 (직진 s + 우회전 r) → "Th+Rt"  (사용자가 직진 phase로 식별)
-                #     phase 2 (좌회전 l only)    → "Lt"
-                #     phase 1/3/5/7 (yellow)    → "Yel"
-                if not active_dirs and not active_movements:
+                    # 'y'/'Y' → yellow (전환 phase 시 active dir 추적)
+                    elif ch in ("y", "Y"):
+                        if d in self.DIRS:
+                            yellow_dirs.add(d)
+                # movement 라벨 (P4 시각화에서 좌회전/직진 구분에 사용)
+                if not green_dirs and not active_movements:
                     movement_label = "Yel"
                 elif active_movements:
                     movement_label = "+".join(sorted(active_movements))
                 else:
                     movement_label = "?"
+                # 키 명명: 기존 "dirs" → "green_dirs" (yellow_dirs 와 명확 구분)
+                # _active_dirs_for 등 호출자가 green_dirs 키 사용하도록 동기화 필요
                 phase_dict[phase_idx] = {
-                    "dirs": active_dirs,
-                    "movement": movement_label,
+                    "green_dirs":  green_dirs,
+                    "yellow_dirs": yellow_dirs,
+                    "movement":    movement_label,
                 }
             result[tls_id] = phase_dict
 
@@ -293,9 +305,19 @@ class SumoRenderer:
         phase = current_phase.get(agent, 0)
         info = self._phase_info.get(tls_id, {}).get(phase)
         if info is not None:
-            return info["dirs"]
+            return info["green_dirs"]
         # fallback: 단일교차로 호환 (phase 0/1/2/3 → DIRS[0/1/2/3])
         return {self.DIRS[phase % 4]}
+
+    def _yellow_dirs_for(self, agent: str, agent_to_tls: Dict[str, str],
+                         current_phase: Dict[str, int]) -> set:
+        """현재 phase 의 yellow 진입 방향 set. yellow phase 가 아니면 빈 set."""
+        tls_id = agent_to_tls.get(agent, "")
+        phase = current_phase.get(agent, 0)
+        info = self._phase_info.get(tls_id, {}).get(phase)
+        if info is not None:
+            return info["yellow_dirs"]
+        return set()
 
     def _phase_movement_for(self, agent: str, agent_to_tls: Dict[str, str],
                             current_phase: Dict[str, int]) -> str:
@@ -372,8 +394,11 @@ class SumoRenderer:
                 continue
 
             agent = next(a for a, t in agent_to_tls.items() if t == nid)
-            # 실제 활성 방향 set (양방향 동시 green 지원, % 4 매핑 제거)
-            active_dirs = self._active_dirs_for(agent, agent_to_tls, current_phase)
+            # P3/P4: green/yellow/red 3단계 + movement 별 marker 분리
+            green_dirs  = self._active_dirs_for(agent, agent_to_tls, current_phase)
+            yellow_dirs = self._yellow_dirs_for(agent, agent_to_tls, current_phase)
+            movement    = self._phase_movement_for(agent, agent_to_tls, current_phase)
+            is_left_turn_phase = "Lt" in movement and "+" not in movement  # pure Lt
             obs = last_obs.get(agent, np.zeros(10, dtype=np.float32))
 
             # 중심 배경 원 + 에이전트 레이블
@@ -381,30 +406,59 @@ class SumoRenderer:
             ax.text(cx, cy, agent, color="white", fontsize=9,
                     ha="center", va="center", fontweight="bold", zorder=10)
 
-            # ── ① 신호등 인디케이터 (N/S/E/W 고정 위치, active_dirs 기준) ─────
-            for i, (dname, (dx, dy), arrow) in enumerate(
+            # ── ① 신호등 인디케이터 (옵션 B 디자인) ──────────────────────────
+            # green + Lt phase → 가려는 방향(좌회전 출구) 화살표
+            # green + Th/Rt/Mix → 동그라미만 (직진은 marker 없음)
+            # yellow → 노란 동그라미 + 작은 진입 화살표
+            # red → 작은 빨간 동그라미만
+            for i, (dname, (dx, dy), entry_arrow) in enumerate(
                 zip(self.DIRS, self.DIR_VEC, self.DIR_ARR)
             ):
                 tx = cx + dx * IO
                 ty = cy + dy * IO
-                is_active = (dname in active_dirs)
-                radius    = RA if is_active else RI
-                sig_clr   = self.ACTIVE_CLR if is_active else self.INACTIVE_CLR
 
-                # 글로우 링 (활성 방향만)
-                if is_active:
+                if dname in green_dirs:
+                    state = "green"
+                    sig_clr = self.ACTIVE_CLR
+                    radius  = RA
+                elif dname in yellow_dirs:
+                    state = "yellow"
+                    sig_clr = self.YELLOW_CLR
+                    radius  = RA * 0.85   # green 보다 약간 작게 (전환 중 표시)
+                else:
+                    state = "red"
+                    sig_clr = self.INACTIVE_CLR
+                    radius  = RI
+
+                # 글로우: green/yellow 만 (활성 표시)
+                if state in ("green", "yellow"):
                     for gr, ga in [(3.5, 0.04), (2.5, 0.11), (1.6, 0.24)]:
                         ax.add_patch(mp.Circle(
                             (tx, ty), radius * gr, color=sig_clr, alpha=ga, zorder=3
                         ))
-                # 신호등 원 + 방향 화살표
+
+                # 동그라미 본체
                 ax.add_patch(mp.Circle(
                     (tx, ty), radius,
-                    color=sig_clr, alpha=1.0 if is_active else 0.65, zorder=4
+                    color=sig_clr, alpha=1.0 if state != "red" else 0.65, zorder=4
                 ))
-                ax.plot(tx, ty, marker=arrow, color="white",
-                        markersize=13 if is_active else 8,
-                        zorder=5, markeredgewidth=0)
+
+                # 동그라미 안 marker 결정 (옵션 B)
+                marker = None
+                if state == "green" and is_left_turn_phase:
+                    # 좌회전 phase → 가려는 방향(좌회전 출구) 화살표
+                    exit_dir = self._LEFT_TURN_EXIT.get(dname)
+                    if exit_dir:
+                        marker = self._DIR_TO_MARKER[exit_dir]
+                elif state == "yellow":
+                    # yellow → 진입 방향 작은 화살표
+                    marker = entry_arrow
+                # red, green 직진/Mix → marker 없음 (동그라미만)
+
+                if marker:
+                    ax.plot(tx, ty, marker=marker, color="white",
+                            markersize=13 if state == "green" else 9,
+                            zorder=5, markeredgewidth=0)
 
             # ── ② 큐 막대 ────────────────────────────────────────────────────
             # 우선순위 1: env 가 전달한 lane별 raw 큐 (정확) → controlled lanes
@@ -473,7 +527,7 @@ class SumoRenderer:
 
                 # 레이블: 이 접근 방향이 현재 green을 받고 있는지 확인
                 # (양방향 동시 green 지원: 예 N+S 가 둘 다 active 일 수 있음)
-                is_active_approach = (adir in active_dirs)
+                is_active_approach = (adir in green_dirs)
                 q_text_clr = (self.ACTIVE_CLR if is_active_approach
                               else _queue_color(queue) if queue > 3
                               else "#888888")
@@ -525,10 +579,13 @@ class SumoRenderer:
         legend_elems = [
             Line2D([0], [0], marker="o", color="none",
                    markerfacecolor=self.ACTIVE_CLR, markersize=12,
-                   label="Green light (active)"),
+                   label="Green (Through=circle / Left=exit arrow)"),
+            Line2D([0], [0], marker="o", color="none",
+                   markerfacecolor=self.YELLOW_CLR, markersize=10,
+                   label="Yellow (transition)"),
             Line2D([0], [0], marker="o", color="none",
                    markerfacecolor=self.INACTIVE_CLR, markersize=8,
-                   label="Red light (stop)"),
+                   label="Red (stop)"),
             mp.Patch(color="#2ecc71", label="Queue ≤ 3 veh"),
             mp.Patch(color="#f39c12", label="Queue ≤ 7 veh"),
             mp.Patch(color="#e74c3c", label="Queue ≥ 8 veh"),

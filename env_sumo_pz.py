@@ -5,7 +5,7 @@ import subprocess
 import tempfile
 import uuid
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 from gymnasium import spaces
@@ -171,6 +171,25 @@ class SumoParallelEnv(ParallelEnv):
 
         # 네트워크 시각화 렌더러
         self._renderer = SumoRenderer(self.sumo_cfg)
+
+        # 매 sim step 직후 호출될 콜백 리스트 (frame 캡쳐 등 외부 hook)
+        # 학습/평가에는 영향 없음 (등록 안 하면 no-op). record_video 에서 사용.
+        self._step_hooks: List[Callable[[int], None]] = []
+
+    def add_step_hook(self, fn: Callable[[int], None]) -> None:
+        """매 sim step 후 호출될 콜백 등록.
+
+        fn(sim_step: int) 형태. _simulate_seconds() 안에서 호출되어
+        delta_time=5 인 한 번의 env.step() 동안 yellow + green 진행 중
+        매초마다 fn 이 호출됨 → 연속 frame 캡쳐 가능.
+
+        예: env.add_step_hook(lambda s: frames.append(env.render()))
+        """
+        self._step_hooks.append(fn)
+
+    def clear_step_hooks(self) -> None:
+        """등록된 모든 step hook 제거 (재사용 시 cleanup)."""
+        self._step_hooks.clear()
 
     # ------------------------------------------------------------------
     # PettingZoo 필수 인터페이스 — obs/act space 동적 결정
@@ -446,6 +465,15 @@ class SumoParallelEnv(ParallelEnv):
             self._episode_teleported += int(
                 self.conn.simulation.getStartingTeleportNumber()
             )
+
+            # 외부 hook 호출 (record_video continuous 모드용 frame 캡쳐 등)
+            # hook 안에서 env.render() 호출되면 매 sim step 마다 frame 1개 생성됨
+            for hook in self._step_hooks:
+                try:
+                    hook(self.sim_step)
+                except Exception:
+                    # hook 예외가 시뮬레이션을 중단시키지 않도록 silent 처리
+                    pass
 
             if self.sim_step >= self.max_steps:
                 return True, progressed
