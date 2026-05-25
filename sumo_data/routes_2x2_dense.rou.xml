@@ -1,0 +1,42 @@
+<!--
+  2x2grid 고밀도 정체 시나리오 (옵션 D)
+
+  원본 routes (sumo-rl) 와 비교:
+    원본: 4 flow × probability 0.1 → 0.4대/초 ≈ 1,440대/시간 (free flow)
+    본 파일: 8 직진 (양방향) × 0.15 + 4 cross (좌회전) × 0.05
+            = 1.4대/초 ≈ 5,040대/시간 (정체 수준)
+
+  Edge 명명규칙 (2x2.net.xml 분석):
+    -h*  : 수평 → 방향 (서→동)        h*  : 수평 ← (동→서)
+    -v*  : 수직 ↓ (북→남)            v*  : 수직 ↑ (남→북)
+
+  flow id 약어:
+    h1_e: 수평 행1 east-bound (서→동)    h1_w: west-bound
+    v1_s: 수직 열1 south-bound (북→남)   v1_n: north-bound
+    cross*: 좌회전 cross-grid (수평↔수직 진입/출구 다름)
+            → SUMO route finder 가 자동으로 좌회전 lane 사용
+            → 좌회전 phase (action 1, 3) 가 의미있게 사용되게 함
+-->
+<routes>
+    <!-- ─ 직진 양방향 (8 flow, 각 probability 0.15) ──────────────────────── -->
+    <!-- 수평 행1: 서→동 / 동→서 -->
+    <flow id="h1_e" from="-h11" to="-h13" begin="0" end="100000" probability="0.15" departSpeed="max" departPos="base" departLane="best"/>
+    <flow id="h1_w" from="h13"  to="h11"  begin="0" end="100000" probability="0.15" departSpeed="max" departPos="base" departLane="best"/>
+    <!-- 수평 행2: 서→동 / 동→서 -->
+    <flow id="h2_e" from="-h21" to="-h23" begin="0" end="100000" probability="0.15" departSpeed="max" departPos="base" departLane="best"/>
+    <flow id="h2_w" from="h23"  to="h21"  begin="0" end="100000" probability="0.15" departSpeed="max" departPos="base" departLane="best"/>
+    <!-- 수직 열1: 북→남 / 남→북 -->
+    <flow id="v1_s" from="-v11" to="-v13" begin="0" end="100000" probability="0.15" departSpeed="max" departPos="base" departLane="best"/>
+    <flow id="v1_n" from="v13"  to="v11"  begin="0" end="100000" probability="0.15" departSpeed="max" departPos="base" departLane="best"/>
+    <!-- 수직 열2: 북→남 / 남→북 -->
+    <flow id="v2_s" from="-v21" to="-v23" begin="0" end="100000" probability="0.15" departSpeed="max" departPos="base" departLane="best"/>
+    <flow id="v2_n" from="v23"  to="v21"  begin="0" end="100000" probability="0.15" departSpeed="max" departPos="base" departLane="best"/>
+
+    <!-- ─ Cross (좌/우회전) — 4 flow, 각 probability 0.05 ────────────────── -->
+    <!-- 진입 edge 는 boundary node 에서 grid 로 들어가는 것만 사용 (h*/v* 역방향은 출구) -->
+    <!-- 좌회전 phase (action 1, 3) 가 자연 사용되게 함 -->
+    <flow id="cross1" from="-h11" to="v11"  begin="0" end="100000" probability="0.05" departSpeed="max" departPos="base" departLane="best"/>
+    <flow id="cross2" from="-h21" to="-v23" begin="0" end="100000" probability="0.05" departSpeed="max" departPos="base" departLane="best"/>
+    <flow id="cross3" from="-v11" to="-h13" begin="0" end="100000" probability="0.05" departSpeed="max" departPos="base" departLane="best"/>
+    <flow id="cross4" from="-v21" to="h11"  begin="0" end="100000" probability="0.05" departSpeed="max" departPos="base" departLane="best"/>
+</routes>

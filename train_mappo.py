@@ -272,8 +272,11 @@ def main():
     #   (B4) entropy_coeff   0.02  → 0.005  — reward magnitude 와 균형 맞춤
     #                                          (이전엔 entropy bonus 가 reward 신호와
     #                                          동일 스케일이라 exploration 편향 과도)
-    #   (A3) vf_clip_param   500.0 → 10.0   — diff-waiting-time reward 스케일에 맞춤
-    #                                          (이전 500 은 사실상 clip 작동 안 함)
+    #   (A3) vf_clip_param   500.0 → 10.0 → 1000.0
+    #                                          10.0 으로 낮췄더니 vf_loss_unclipped=175189
+    #                                          대비 vf_loss=9.89 로 VF 신호 거의 전부 소실
+    #                                          → diff-waiting-time 실제 reward 스케일에 맞춰
+    #                                            1000.0 으로 복원
     #   (C4) train_batch_size 4000 → 8000   — gradient noise variance 감소 (∝ 1/N)
     hparams = dict(
         lr=1e-4,
@@ -285,7 +288,7 @@ def main():
         clip_param=0.2,
         vf_loss_coeff=0.5,
         entropy_coeff=0.005,      # B4: 0.02 → 0.005
-        vf_clip_param=10.0,       # A3: 500 → 10 (reward 스케일에 맞춤)
+        vf_clip_param=1000.0,     # A3: 500 → 10 → 1000 (VF signal 복원)
     )
 
     config = (
@@ -294,7 +297,14 @@ def main():
         .framework("torch")
         # num_env_runners=0: driver process에서 직접 rollout 수행 (디버깅 편의)
         # num_env_runners≥1: 별도 worker process 사용 (안정적 병렬 수집)
-        .env_runners(num_env_runners=args.num_workers)
+        # sample_timeout_s=600: Ray 기본값 60초로는 dense traffic 시나리오의
+        #   1 episode (~720 step, traci 호출 부하 큰) rollout 시간이 부족
+        #   → worker가 timeout으로 빈 sample 반환 → train_total_steps=0
+        #   증상 회피 위해 600초로 증가 (driver mode num_workers=0 은 무관)
+        .env_runners(
+            num_env_runners=args.num_workers,
+            sample_timeout_s=600.0,
+        )
         .resources(num_gpus=0)  # M4 Mac: RLlib은 MPS 미지원, CPU 학습
         .callbacks(callbacks_class=_build_callback())  # 진단 지표 RLlib 메트릭 등록
         .multi_agent(
@@ -430,6 +440,7 @@ if __name__ == "__main__":
     # 종료를 지연시켜 "학습 완료 후 무한 hang" 으로 보이는 문제를 방지.
     # main() 의 finally 에서 정상 cleanup 시도 완료 후, os._exit() 로
     # 모든 자식 프로세스 및 background thread 를 즉시 종료.
+    import os, sys
     exit_code = 0
     try:
         main()
@@ -437,8 +448,16 @@ if __name__ == "__main__":
         print("\n학습 중단 (KeyboardInterrupt)")
         exit_code = 130  # 128 + SIGINT(2) — POSIX 관례
     except Exception as e:
+        import traceback
         print(f"\n학습 실패: {type(e).__name__}: {e}")
+        traceback.print_exc()
         exit_code = 1
     finally:
-        import os
+        # os._exit() 는 stdio buffer 를 flush 하지 않으므로 명시적으로 flush
+        # (이전엔 학습 로그 print 가 buffer 에 남은 채 종료되어 보이지 않았음)
+        try:
+            sys.stdout.flush()
+            sys.stderr.flush()
+        except Exception:
+            pass
         os._exit(exit_code)

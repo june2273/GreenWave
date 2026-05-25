@@ -150,6 +150,7 @@ def main():
 if __name__ == "__main__":
     # Ray 2.10+ 의 잔존 worker actor / SUMO 좀비 프로세스가 Python interpreter
     # 종료를 지연시켜 "비디오 저장 후 무한 hang" 으로 보이는 문제 방지
+    import os, sys
     exit_code = 0
     try:
         main()
@@ -157,8 +158,14 @@ if __name__ == "__main__":
         print("\n비디오 녹화 중단 (KeyboardInterrupt)")
         exit_code = 130
     except Exception as e:
+        import traceback
         print(f"\n비디오 녹화 실패: {type(e).__name__}: {e}")
+        traceback.print_exc()
         exit_code = 1
     finally:
-        import os
+        try:
+            sys.stdout.flush()
+            sys.stderr.flush()
+        except Exception:
+            pass
         os._exit(exit_code)

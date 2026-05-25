@@ -304,6 +304,7 @@ def main():
 if __name__ == "__main__":
     # Ray 2.10+ 의 잔존 worker actor 가 Python interpreter 종료를 지연시키는
     # 문제 방지 — main() finally 의 cleanup 후 os._exit 으로 강제 종료
+    import os, sys
     exit_code = 0
     try:
         main()
@@ -311,8 +312,14 @@ if __name__ == "__main__":
         print("\n평가 중단 (KeyboardInterrupt)")
         exit_code = 130
     except Exception as e:
+        import traceback
         print(f"\n평가 실패: {type(e).__name__}: {e}")
+        traceback.print_exc()
         exit_code = 1
     finally:
-        import os
+        try:
+            sys.stdout.flush()
+            sys.stderr.flush()
+        except Exception:
+            pass
         os._exit(exit_code)
