@@ -1,11 +1,12 @@
 import functools
+import math
 import os
 import shutil
 import subprocess
 import tempfile
 import uuid
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Set, Tuple
 
 import numpy as np
 from gymnasium import spaces
@@ -71,6 +72,8 @@ class SumoParallelEnv(ParallelEnv):
         max_steps: int = 3600,
         reward_mode: str = "queue",
         tls_ids: Optional[List[str]] = None,
+        ctde_mode: bool = False,
+        ctde_shared_reward: bool = True,
     ):
         self.base_dir = Path(__file__).resolve().parent
         self.sumo_data_dir = self.base_dir / "sumo_data"
@@ -96,6 +99,8 @@ class SumoParallelEnv(ParallelEnv):
         self.min_green = int(min_green)
         self.max_steps = int(max_steps)
         self.reward_mode = reward_mode
+        self.ctde_mode = bool(ctde_mode)
+        self.ctde_shared_reward = bool(ctde_shared_reward)
 
         # SUMO TLS id → PettingZoo agent id 매핑
         self._tls_ids: List[str] = tls_ids if tls_ids is not None else ["C"]
@@ -160,6 +165,15 @@ class SumoParallelEnv(ParallelEnv):
         self._throughput: int = 0
         self._queue_cumsum: float = 0.0
 
+        # Insertion-failure 가시화 카운터 (dense traffic 좌회전 lane saturation 진단)
+        # SUMO 는 lane이 꽉 차면 차량 출발 자체를 silent 하게 막아 queue/teleport
+        # 어디에도 잡히지 않음. loaded - departed = pending insertion (sim 밖 대기).
+        # 누적값: 매 step getLoadedNumber/getDepartedNumber 를 합산.
+        self._episode_loaded_total: int = 0
+        self._episode_departed_total: int = 0
+        self._episode_pending_peak: int = 0
+        self._episode_pending_final: int = 0
+
         # 진단 카운터 (action_counts는 동적 num_green 길이)
         self._episode_phase_switches: int = 0
         self._episode_max_queue: float = 0.0
@@ -169,12 +183,38 @@ class SumoParallelEnv(ParallelEnv):
         # diff-waiting-time 보상 모드 전용
         self._last_wait_measure: Dict[str, float] = {}
 
+        # ── Green Wave 평가 지표 (Tier 1 + Tier 2) ─────────────────────────
+        # Tier 1: stop-and-go / 환경부담 / 흐름 직접 측정
+        self._episode_co2_sum: float = 0.0           # 총 CO2 배출 (mg)
+        self._episode_speed_sum: float = 0.0         # 속도 합 (스텝×차량)
+        self._episode_speed_sq_sum: float = 0.0      # 속도 제곱 합 (variance 용)
+        self._episode_speed_count: int = 0           # 표본 수 (스텝×차량)
+        self._vehicle_stop_count: Dict[str, int] = {}    # 차량별 누적 정지 수
+        self._vehicle_prev_speed: Dict[str, float] = {}  # 정지 transition 감지
+        self._vehicle_seen: Set[str] = set()         # 에피소드 등장 차량 (정규화 분모)
+
+        # Tier 2: 방향별 대기시간 (E-W vs N-S 코리도어 분석)
+        # lane_direction 은 probe 시 1회 결정되어 spec dict 에 포함됨
+        self._lane_direction: Dict[str, str] = spec["lane_direction"]
+        self._episode_wait_ew_sum: float = 0.0
+        self._episode_wait_ns_sum: float = 0.0
+        # 누적합 분모 (스텝×lane)
+        self._episode_wait_ew_count: int = 0
+        self._episode_wait_ns_count: int = 0
+
         # 네트워크 시각화 렌더러
         self._renderer = SumoRenderer(self.sumo_cfg)
 
         # 매 sim step 직후 호출될 콜백 리스트 (frame 캡쳐 등 외부 hook)
         # 학습/평가에는 영향 없음 (등록 안 하면 no-op). record_video 에서 사용.
         self._step_hooks: List[Callable[[int], None]] = []
+
+        # CTDE 단일 교차로 경고 (degenerate: global obs == local obs)
+        if self.ctde_mode and len(self._tls_ids) == 1:
+            print(
+                "[CTDE warning] tls_ids 가 1개입니다. global obs == local obs 가 되어 "
+                "centralized critic 의 의미가 사라집니다. 다중 교차로에서 사용하세요."
+            )
 
     def add_step_hook(self, fn: Callable[[int], None]) -> None:
         """매 sim step 후 호출될 콜백 등록.
@@ -197,16 +237,45 @@ class SumoParallelEnv(ParallelEnv):
 
     @functools.lru_cache(maxsize=None)
     def observation_space(self, agent: str) -> spaces.Space:
-        return spaces.Box(
+        local = spaces.Box(
             low=0.0,
             high=1.0,
             shape=(self._obs_dim,),
             dtype=np.float32,
         )
+        if not self.ctde_mode:
+            return local
+        # CTDE: actor 는 "local" 만, critic 은 "global"(전체 agent 의 local concat) 사용
+        n_agents = len(self.possible_agents)
+        global_space = spaces.Box(
+            low=0.0,
+            high=1.0,
+            shape=(self._obs_dim * n_agents,),
+            dtype=np.float32,
+        )
+        return spaces.Dict({"local": local, "global": global_space})
 
     @functools.lru_cache(maxsize=None)
     def action_space(self, agent: str) -> spaces.Space:
         return spaces.Discrete(self._num_green)
+
+    # ------------------------------------------------------------------
+    # Lane 방향 분류 — 평가 지표 per_direction_wait 용
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _classify_direction(shape: list) -> str:
+        """lane shape (좌표 리스트) → 'ew' 또는 'ns'.
+
+        start→end 벡터의 각도가 ±45° 이내면 동서, 그 외면 남북.
+        2점 미만이면 기본값 'ew'.
+        """
+        if len(shape) < 2:
+            return "ew"
+        dx = shape[-1][0] - shape[0][0]
+        dy = shape[-1][1] - shape[0][1]
+        abs_a = abs(math.degrees(math.atan2(dy, dx)))
+        return "ew" if (abs_a <= 45 or abs_a >= 135) else "ns"
 
     # ------------------------------------------------------------------
     # SUMO 유틸리티
@@ -289,6 +358,7 @@ class SumoParallelEnv(ParallelEnv):
             per_agent_green_phases: Dict[str, List[int]] = {}
             per_agent_yellow_map: Dict[str, Dict[int, int]] = {}
             lane_capacities: Dict[str, float] = {}
+            lane_direction: Dict[str, str] = {}
 
             for agent, tls_id in zip(self.possible_agents, self._tls_ids):
                 lanes = list(dict.fromkeys(
@@ -303,10 +373,19 @@ class SumoParallelEnv(ParallelEnv):
                 per_agent_out_lanes[agent] = out_lanes
 
                 # lane 용량 추정: lane 길이 / 차량 footprint (5m + 2.5m gap)
+                # lane 방향: shape 의 start→end 각도 기반 ew/ns 분류
                 for ln in lanes + out_lanes:
                     if ln not in lane_capacities:
                         length = float(conn.lane.getLength(ln))
                         lane_capacities[ln] = max(1.0, length / _VEHICLE_FOOTPRINT_M)
+                for ln in lanes:
+                    if ln not in lane_direction:
+                        try:
+                            lane_direction[ln] = self._classify_direction(
+                                conn.lane.getShape(ln)
+                            )
+                        except Exception:
+                            lane_direction[ln] = "ew"
 
                 # green phase 인덱스 + green→다음yellow 매핑
                 green_indices, yellow_map = self._extract_phase_structure(conn, tls_id)
@@ -329,6 +408,7 @@ class SumoParallelEnv(ParallelEnv):
                 "per_agent_green_phases": per_agent_green_phases,
                 "per_agent_yellow_map": per_agent_yellow_map,
                 "lane_capacities": lane_capacities,
+                "lane_direction": lane_direction,
             }
         finally:
             if conn is not None:
@@ -427,6 +507,9 @@ class SumoParallelEnv(ParallelEnv):
         self.conn = traci.getConnection(self._conn_label)
         # lane / phase 스펙은 __init__의 probe 결과를 재사용 (재추출 불필요)
 
+    # 정지 transition 감지 임계 (m/s). SUMO 기본 차량 모델 기준 정지 직전/후 ≈ 0.
+    _STOP_SPEED_THRESHOLD = 0.1
+
     def _simulate_seconds(self, num_seconds: int) -> Tuple[bool, int]:
         """num_seconds만큼 시뮬레이션 진행; (done, 실제_진행_초) 반환"""
         for progressed in range(1, num_seconds + 1):
@@ -439,6 +522,20 @@ class SumoParallelEnv(ParallelEnv):
                 self._latest_waiting[veh_id] = (
                     self.conn.vehicle.getAccumulatedWaitingTime(veh_id)
                 )
+                # Green Wave Tier 1 지표: speed + CO2 + 정지 횟수
+                speed = float(self.conn.vehicle.getSpeed(veh_id))
+                self._episode_speed_sum += speed
+                self._episode_speed_sq_sum += speed * speed
+                self._episode_speed_count += 1
+                self._episode_co2_sum += float(self.conn.vehicle.getCO2Emission(veh_id))
+                self._vehicle_seen.add(veh_id)
+                # 정지 transition: prev > 임계 AND 현재 ≤ 임계
+                prev = self._vehicle_prev_speed.get(veh_id, speed)
+                if prev > self._STOP_SPEED_THRESHOLD and speed <= self._STOP_SPEED_THRESHOLD:
+                    self._vehicle_stop_count[veh_id] = (
+                        self._vehicle_stop_count.get(veh_id, 0) + 1
+                    )
+                self._vehicle_prev_speed[veh_id] = speed
 
             for veh_id in self.conn.simulation.getArrivedIDList():
                 self._throughput += 1
@@ -462,9 +559,38 @@ class SumoParallelEnv(ParallelEnv):
                 if step_max > self._episode_max_queue:
                     self._episode_max_queue = step_max
 
+            # Green Wave Tier 2 지표: 방향별 대기시간 (lane.getWaitingTime → 누적)
+            # 매 step lane.getWaitingTime 은 그 lane 의 현재 대기 차량 합. EW/NS 분리해
+            # episode 내 평균을 후속에서 계산.
+            for ln in self._lane_ids:
+                w = float(self.conn.lane.getWaitingTime(ln))
+                if self._lane_direction.get(ln, "ew") == "ew":
+                    self._episode_wait_ew_sum += w
+                    self._episode_wait_ew_count += 1
+                else:
+                    self._episode_wait_ns_sum += w
+                    self._episode_wait_ns_count += 1
+
             self._episode_teleported += int(
                 self.conn.simulation.getStartingTeleportNumber()
             )
+
+            # Insertion-failure 추적: 매 step loaded / departed 누적, pending 피크
+            # pending = 출발 시각이 지났는데 아직 lane 에 들어가지 못한 차량 수.
+            # peak 와 final 두 값 모두 기록 — saturate 패턴 진단용.
+            self._episode_loaded_total += int(
+                self.conn.simulation.getLoadedNumber()
+            )
+            self._episode_departed_total += int(
+                self.conn.simulation.getDepartedNumber()
+            )
+            try:
+                pending_now = len(self.conn.simulation.getPendingVehicles())
+            except (traci.TraCIException, AttributeError):
+                pending_now = 0
+            if pending_now > self._episode_pending_peak:
+                self._episode_pending_peak = pending_now
+            self._episode_pending_final = pending_now
 
             # 외부 hook 호출 (record_video continuous 모드용 frame 캡쳐 등)
             # hook 안에서 env.render() 호출되면 매 sim step 마다 frame 1개 생성됨
@@ -525,6 +651,25 @@ class SumoParallelEnv(ParallelEnv):
     # PettingZoo Parallel API
     # ------------------------------------------------------------------
 
+    def _wrap_obs(self, local_obs: Dict[str, np.ndarray]) -> Dict[str, object]:
+        """ctde_mode 면 per-agent obs 를 {'local','global'} Dict 로 래핑.
+
+        global concat 순서는 항상 `possible_agents` 기준 — `self.agents` 는
+        에피소드 종료 시 빈 리스트로 mutate 되므로 안정성 보장 안 됨.
+        결측 agent 는 0 벡터로 채워 shape 고정.
+        """
+        if not self.ctde_mode:
+            return local_obs
+        zero = np.zeros(self._obs_dim, dtype=np.float32)
+        global_vec = np.concatenate([
+            local_obs.get(a, self._last_obs.get(a, zero))
+            for a in self.possible_agents
+        ]).astype(np.float32)
+        return {
+            a: {"local": local_obs[a], "global": global_vec}
+            for a in local_obs
+        }
+
     def reset(
         self,
         seed: Optional[int] = None,
@@ -547,6 +692,23 @@ class SumoParallelEnv(ParallelEnv):
         self._episode_max_queue = 0.0
         self._episode_action_counts.fill(0)
         self._episode_teleported = 0
+        self._episode_loaded_total = 0
+        self._episode_departed_total = 0
+        self._episode_pending_peak = 0
+        self._episode_pending_final = 0
+
+        # Green Wave 지표 초기화 (Tier 1 + 2)
+        self._episode_co2_sum = 0.0
+        self._episode_speed_sum = 0.0
+        self._episode_speed_sq_sum = 0.0
+        self._episode_speed_count = 0
+        self._vehicle_stop_count.clear()
+        self._vehicle_prev_speed.clear()
+        self._vehicle_seen.clear()
+        self._episode_wait_ew_sum = 0.0
+        self._episode_wait_ns_sum = 0.0
+        self._episode_wait_ew_count = 0
+        self._episode_wait_ns_count = 0
 
         # 초기 phase: 각 agent의 green_phases[0] 으로 강제 설정 (자동 cycle 차단)
         for agent in self.agents:
@@ -556,7 +718,8 @@ class SumoParallelEnv(ParallelEnv):
             self._elapsed_phase_time[agent] = 0
             self._set_phase_locked(self._agent_to_tls[agent], initial_phase)
 
-        observations = {a: self._compute_obs(a) for a in self.agents}
+        local_obs = {a: self._compute_obs(a) for a in self.agents}
+        observations = self._wrap_obs(local_obs)
         infos = {a: {"phase": self._current_phase[a]} for a in self.agents}
         return observations, infos
 
@@ -624,10 +787,10 @@ class SumoParallelEnv(ParallelEnv):
         )
         step_throughput = self._throughput - throughput_before
 
-        observations, rewards, terminations, truncations, infos = {}, {}, {}, {}, {}
+        local_obs: Dict[str, np.ndarray] = {}
+        rewards, terminations, truncations, infos = {}, {}, {}, {}
         for agent in self.agents:
-            obs = self._compute_obs(agent)
-            observations[agent] = obs
+            local_obs[agent] = self._compute_obs(agent)
 
             # ── 보상 함수 ─────────────────────────────────────────────
             lanes = self._per_agent_lanes[agent]
@@ -659,6 +822,34 @@ class SumoParallelEnv(ParallelEnv):
             rewards[agent] = reward
             terminations[agent] = False
             truncations[agent] = done
+
+        # ── Green Wave 평가 지표 집계 (Tier 1 + 2) ─────────────────────────
+        n_seen = max(1, len(self._vehicle_seen))
+        n_speed = max(1, self._episode_speed_count)
+        avg_speed = self._episode_speed_sum / n_speed
+        # 표본분산 = E[X²] − (E[X])²
+        speed_var = max(0.0, self._episode_speed_sq_sum / n_speed - avg_speed ** 2)
+        speed_std = math.sqrt(speed_var)
+        speed_cv = speed_std / avg_speed if avg_speed > 1e-6 else 0.0
+        avg_stops = sum(self._vehicle_stop_count.values()) / n_seen
+        avg_co2 = self._episode_co2_sum / n_seen
+        wait_ew = (
+            self._episode_wait_ew_sum / self._episode_wait_ew_count
+            if self._episode_wait_ew_count > 0 else 0.0
+        )
+        wait_ns = (
+            self._episode_wait_ns_sum / self._episode_wait_ns_count
+            if self._episode_wait_ns_count > 0 else 0.0
+        )
+
+        # CTDE 공유 보상 — 모든 agent 가 동일한 mean(reward) 받음
+        if self.ctde_mode and self.ctde_shared_reward and rewards:
+            shared = float(np.mean(list(rewards.values())))
+            for a in rewards:
+                rewards[a] = shared
+
+        # info dict — 모든 agent 가 동일한 에피소드 지표를 받음 (callback/eval 호환)
+        for agent in self.agents:
             infos[agent] = {
                 "phase": self._current_phase[agent],
                 "phase_changed": switching[agent],
@@ -670,10 +861,27 @@ class SumoParallelEnv(ParallelEnv):
                 "phase_switches": int(self._episode_phase_switches),
                 "max_queue": float(self._episode_max_queue),
                 "teleported": int(self._episode_teleported),
+                # Insertion-failure 가시화: lane saturation 으로 출발 못 한 차량 수
+                # loaded - departed = 누적 insertion 실패, pending_peak/final 은 즉시 대기수
+                "vehicles_loaded":       int(self._episode_loaded_total),
+                "vehicles_departed":     int(self._episode_departed_total),
+                "vehicles_lost_insert":  int(self._episode_loaded_total - self._episode_departed_total),
+                "pending_insert_peak":   int(self._episode_pending_peak),
+                "pending_insert_final":  int(self._episode_pending_final),
                 "action_counts": self._episode_action_counts.tolist(),
                 # 렌더러/디버깅용 — agent별 controlled lane 순서대로의 halting 차량 수
                 "queue_per_lane": list(self._last_queue_per_lane[agent]),
+                # Green Wave Tier 1 직접 지표
+                "avg_stops_per_vehicle": float(avg_stops),
+                "avg_co2_per_vehicle":   float(avg_co2),
+                "avg_speed":             float(avg_speed),
+                # Green Wave Tier 2 코리도어 지표
+                "speed_cv":              float(speed_cv),
+                "per_direction_wait_ew": float(wait_ew),
+                "per_direction_wait_ns": float(wait_ns),
             }
+
+        observations = self._wrap_obs(local_obs)
 
         if done:
             self.agents = []

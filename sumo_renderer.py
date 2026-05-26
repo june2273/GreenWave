@@ -106,9 +106,9 @@ class SumoRenderer:
         IO   = sz * 0.065   # 중심 → 신호등 거리
         RA   = sz * 0.022   # 활성 신호등 반지름
         RI   = sz * 0.015   # 비활성 신호등 반지름
-        # 큐 막대 최대 길이: 교차로 사이 거리의 약 절반까지 뻗도록 sz × 0.30
-        # (이전 IO * 0.90 ≈ sz × 0.058 보다 ~5배 길어짐 — 작은 큐도 잘 보임)
-        BLEN = sz * 0.30
+        # 큐 막대 최대 길이: 원본 IO×0.90 ≈ sz×0.058 의 ~3배.
+        # (이전 5배(sz×0.30)는 queue=3 만 돼도 인접 교차로 segment 절반을 차지해 과장됨)
+        BLEN = sz * 0.18
         BW   = sz * 0.013   # 큐 막대 너비
         return IO, RA, RI, BLEN, BW, (xmin, ymin, xmax, ymax)
 
@@ -358,7 +358,12 @@ class SumoRenderer:
             green_dirs  = self._active_dirs_for(agent, agent_to_tls, current_phase)
             yellow_dirs = self._yellow_dirs_for(agent, agent_to_tls, current_phase)
             movement    = self._phase_movement_for(agent, agent_to_tls, current_phase)
-            is_left_turn_phase = "Lt" in movement and "+" not in movement  # pure Lt
+            # 좌회전 허용 phase: "Lt" 포함 시 표시.
+            # 단일 교차로 (single.sumocfg) 는 모든 phase 가 "Lt+Th" 라서 이전의
+            # `"+" not in movement` 조건이 한 번도 만족 안 됨 → 좌회전 마커 미표시 버그.
+            # 2x2grid 처럼 phase 가 분리된 경우 ("Lt", "Rt+Th" 등) 에서는
+            # Lt 가 active 한 phase 만 마커가 뜨므로 영향 없음.
+            is_left_turn_phase = "Lt" in movement
             obs = last_obs.get(agent, np.zeros(10, dtype=np.float32))
 
             # 중심 배경 원 + 에이전트 레이블

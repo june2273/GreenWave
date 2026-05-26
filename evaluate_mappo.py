@@ -64,7 +64,11 @@ def _make_env(config: dict) -> ParallelPettingZooEnv:
 def parse_args():
     p = argparse.ArgumentParser(description="Evaluate MAPPO vs Fixed-time baseline")
     p.add_argument("--model", type=str, required=True,
-                   help="RLlib 체크포인트 디렉터리 (예: models/MAPPO_sumo_1)")
+                   help="MAPPO 체크포인트 디렉터리 (예: models/MAPPO_sumo_1). "
+                        "단순 MAPPO (decentralized critic) 가 학습된 모델.")
+    p.add_argument("--model-ctde", type=str, default=None,
+                   help="(선택) CTDE-MAPPO 체크포인트 디렉터리 (예: models/MAPPO_CTDE_sumo_1). "
+                        "지정 시 3-way 비교 (FixedTime vs MAPPO vs CTDE) 수행.")
     p.add_argument("--episodes", type=int, default=5)
     p.add_argument("--seed", type=int, default=100)
     p.add_argument("--csv-out", type=str, default=None,
@@ -119,6 +123,20 @@ def _row_from_info(algorithm: str, ep: int, seed: int, info: dict) -> dict:
         "phase_switches":     info.get("phase_switches",     np.nan),
         "max_queue":          info.get("max_queue",          np.nan),
         "teleported":         info.get("teleported",         np.nan),
+        # Insertion-failure 가시화 — teleport 비활성 시 silent drop 추적용
+        "vehicles_loaded":     info.get("vehicles_loaded",     np.nan),
+        "vehicles_departed":   info.get("vehicles_departed",   np.nan),
+        "vehicles_lost_insert":info.get("vehicles_lost_insert",np.nan),
+        "pending_insert_peak": info.get("pending_insert_peak", np.nan),
+        "pending_insert_final":info.get("pending_insert_final",np.nan),
+        # Green Wave Tier 1 직접 지표
+        "avg_stops_per_vehicle": info.get("avg_stops_per_vehicle", np.nan),
+        "avg_co2_per_vehicle":   info.get("avg_co2_per_vehicle",   np.nan),
+        "avg_speed":             info.get("avg_speed",             np.nan),
+        # Green Wave Tier 2 코리도어 지표
+        "speed_cv":              info.get("speed_cv",              np.nan),
+        "per_direction_wait_ew": info.get("per_direction_wait_ew", np.nan),
+        "per_direction_wait_ns": info.get("per_direction_wait_ns", np.nan),
     }
     row.update(_action_ratios(info.get("action_counts", [])))
     return row
@@ -148,6 +166,22 @@ def main():
     # 모델 학습 메타데이터 (없으면 빈 dict) — CSV 모든 행에 prefix로 부착
     train_meta = _load_train_metadata(args.model)
 
+    # CTDE 모델은 ctde_module.CentralizedCriticPPOModule 의 import 가능성을 위해
+    # 명시적으로 import (PPO.from_checkpoint 가 module_class 를 FQN 으로 resolve 함)
+    algo_ctde = None
+    module_ctde = None
+    train_meta_ctde: dict = {}
+    if args.model_ctde:
+        from ctde_module import CentralizedCriticPPOModule  # noqa: F401
+        algo_ctde = PPO.from_checkpoint(str(Path(args.model_ctde).resolve()))
+        module_ctde = algo_ctde.get_module("shared_policy")
+        train_meta_ctde = _load_train_metadata(args.model_ctde)
+        if not train_meta_ctde.get("ctde_mode"):
+            print(
+                "[warning] --model-ctde 로 지정된 체크포인트의 train_metadata.json 에 "
+                "ctde_mode=True 가 없습니다. CTDE 체크포인트가 맞는지 확인하세요."
+            )
+
     # --traffic high + --sumo-cfg 미지정 → dense sumocfg 자동 사용
     sumo_cfg_effective = args.sumo_cfg
     if args.traffic == "high" and not sumo_cfg_effective:
@@ -171,9 +205,14 @@ def main():
 
     rows = []
 
-    # 두 환경을 미리 생성해 인터리브 루프에서 공유
-    env_mappo = SumoParallelEnv(**env_kwargs)
-    env_fix   = SumoParallelEnv(**env_kwargs)
+    # 환경 인스턴스 — MAPPO/FixedTime 은 ctde_mode=False, CTDE 는 True (Dict obs).
+    # 모든 환경이 같은 seed 로 reset 되어 SUMO 차량 수요가 동일하게 재현됨.
+    env_mappo = SumoParallelEnv(**env_kwargs, ctde_mode=False)
+    env_fix   = SumoParallelEnv(**env_kwargs, ctde_mode=False)
+    env_ctde = (
+        SumoParallelEnv(**env_kwargs, ctde_mode=True, ctde_shared_reward=True)
+        if module_ctde is not None else None
+    )
 
     # 동적 METRIC_COLS: num_green에 맞춰 action_*_ratio 컬럼 수 조정
     # (단일·2x2grid 모두 num_green=4 이지만 다른 네트워크 대응)
@@ -182,6 +221,12 @@ def main():
         "avg_waiting_time", "std_waiting_time", "avg_travel_time",
         "total_queue_length", "throughput",
         "phase_switches", "max_queue", "teleported",
+        # Insertion-failure 컬럼 — dense traffic 시 좌회전 lane saturation 가시화
+        "vehicles_loaded", "vehicles_departed", "vehicles_lost_insert",
+        "pending_insert_peak", "pending_insert_final",
+        # Green Wave 지표 — 모든 algorithm 에 공통 기록
+        "avg_stops_per_vehicle", "avg_co2_per_vehicle", "avg_speed",
+        "speed_cv", "per_direction_wait_ew", "per_direction_wait_ns",
         *[f"action_{i}_ratio" for i in range(num_green)],
     ]
 
@@ -195,6 +240,23 @@ def main():
             ).item())
             for agent in agents
         }
+
+    def ctde_action(obs_dict, step_idx, agents):
+        """CTDE 모델은 obs 가 Dict({local, global}) — local 만 actor 에 전달.
+
+        Decentralized execution: 실제 추론 시 global 은 사용 안 됨.
+        """
+        out = {}
+        for agent in agents:
+            local = obs_dict[agent]["local"]
+            global_ = obs_dict[agent]["global"]
+            batch = {"obs": {
+                "local":  torch.tensor(local[None],  dtype=torch.float32),
+                "global": torch.tensor(global_[None], dtype=torch.float32),
+            }}
+            logits = module_ctde.forward_inference(batch)["action_dist_inputs"]
+            out[agent] = int(torch.argmax(logits, dim=-1).item())
+        return out
 
     def fixed_action(obs_dict, step_idx, agents):
         phase = int((step_idx // args.baseline_phase_steps) % 4)
@@ -216,9 +278,28 @@ def main():
             print(f"[MAPPO]     ep={ep} seed={seed} | "
                   f"wait={r['avg_waiting_time']:.1f}s | "
                   f"queue={r['total_queue_length']:.0f} | "
-                  f"switches={r['phase_switches']:.0f} | "
+                  f"stops/veh={r['avg_stops_per_vehicle']:.2f} | "
+                  f"co2/veh={r['avg_co2_per_vehicle']:.0f} | "
+                  f"speed={r['avg_speed']:.2f} | "
                   f"act_dist=[{act_dist_str}] | "
-                  f"teleport={r['teleported']:.0f}")
+                  f"teleport={r['teleported']:.0f} | "
+                  f"lost_insert={r['vehicles_lost_insert']:.0f} "
+                  f"(pending_peak={r['pending_insert_peak']:.0f})")
+
+            # ── CTDE (선택, 동일 seed) ────────────────────────────────────────
+            if env_ctde is not None:
+                info = run_episode(env_ctde, ctde_action, seed=seed)
+                rows.append(_row_from_info("CTDE", ep, seed, info))
+                r = rows[-1]
+                print(f"[CTDE]      ep={ep} seed={seed} | "
+                      f"wait={r['avg_waiting_time']:.1f}s | "
+                      f"queue={r['total_queue_length']:.0f} | "
+                      f"stops/veh={r['avg_stops_per_vehicle']:.2f} | "
+                      f"co2/veh={r['avg_co2_per_vehicle']:.0f} | "
+                      f"speed={r['avg_speed']:.2f} | "
+                      f"teleport={r['teleported']:.0f} | "
+                      f"lost_insert={r['vehicles_lost_insert']:.0f} "
+                      f"(pending_peak={r['pending_insert_peak']:.0f})")
 
             # ── FixedTime (동일 seed) ─────────────────────────────────────────
             info = run_episode(env_fix, fixed_action, seed=seed)
@@ -227,24 +308,38 @@ def main():
             print(f"[FixedTime] ep={ep} seed={seed} | "
                   f"wait={r['avg_waiting_time']:.1f}s | "
                   f"queue={r['total_queue_length']:.0f} | "
-                  f"teleport={r['teleported']:.0f}")
+                  f"stops/veh={r['avg_stops_per_vehicle']:.2f} | "
+                  f"co2/veh={r['avg_co2_per_vehicle']:.0f} | "
+                  f"speed={r['avg_speed']:.2f} | "
+                  f"teleport={r['teleported']:.0f} | "
+                  f"lost_insert={r['vehicles_lost_insert']:.0f} "
+                  f"(pending_peak={r['pending_insert_peak']:.0f})")
     finally:
         # 각 cleanup 독립 실행 — Ray 2.10+ algo.stop()/ray.shutdown() hang 회피
-        for cleanup_fn, name in (
+        cleanup_targets = [
             (env_mappo.close, "env_mappo.close"),
             (env_fix.close,   "env_fix.close"),
             (algo.stop,       "algo.stop"),
-            (ray.shutdown,    "ray.shutdown"),
-        ):
+        ]
+        if env_ctde is not None:
+            cleanup_targets.insert(2, (env_ctde.close, "env_ctde.close"))
+        if algo_ctde is not None:
+            cleanup_targets.append((algo_ctde.stop, "algo_ctde.stop"))
+        cleanup_targets.append((ray.shutdown, "ray.shutdown"))
+        for cleanup_fn, name in cleanup_targets:
             try:
                 cleanup_fn()
             except Exception as e:
                 print(f"[cleanup warning] {name}: {type(e).__name__}: {e}")
 
     # ── 요약 행 추가 (algorithm별 mean / std) ─────────────────────────────
+    # CTDE 는 --model-ctde 지정 시에만 rows 에 존재하므로 동적으로 포함
     df_raw = pd.DataFrame(rows)
+    algo_names = ["MAPPO", "FixedTime"]
+    if env_ctde is not None:
+        algo_names.insert(1, "CTDE")  # MAPPO, CTDE, FixedTime 순으로 표시
     summary_rows = []
-    for algo_name in ("MAPPO", "FixedTime"):
+    for algo_name in algo_names:
         sub = df_raw[df_raw["algorithm"] == algo_name]
         if sub.empty:
             continue
@@ -266,9 +361,13 @@ def main():
     # 캡쳐만 보고도 LLM이 어느 모델·hyperparameter 결과인지 식별 가능
     meta_prefix = {
         "model_path":        str(Path(args.model).resolve()),
+        "model_path_ctde":   (str(Path(args.model_ctde).resolve())
+                              if args.model_ctde else ""),
         "train_iter":        train_meta.get("train_iter", ""),
+        "train_iter_ctde":   train_meta_ctde.get("train_iter", ""),
         "train_total_steps": train_meta.get("train_total_steps", ""),
         "reward_mode":       train_meta.get("reward_mode", args.reward_mode),
+        "ctde_reward":       train_meta_ctde.get("ctde_reward", ""),
         "lr":                train_meta.get("lr", ""),
         "entropy_coeff":     train_meta.get("entropy_coeff", ""),
         "vf_clip_param":     train_meta.get("vf_clip_param", ""),
@@ -288,17 +387,26 @@ def main():
 
     print(f"\nSaved: {out_path}")
     print(f"Train metadata: {'loaded' if train_meta else 'not found (older model)'}")
+    if env_ctde is not None:
+        print(f"CTDE metadata:  {'loaded' if train_meta_ctde else 'not found'}")
     print("\n=== Summary (mean ± std) ===")
-    for algo_name in ("MAPPO", "FixedTime"):
+    for algo_name in algo_names:
         sub = df_raw[df_raw["algorithm"] == algo_name][metric_cols]
         if sub.empty:
             continue
         print(f"\n[{algo_name}]")
         for col in ("avg_waiting_time", "avg_travel_time",
                     "total_queue_length", "throughput",
-                    "phase_switches", "teleported"):
+                    "phase_switches", "teleported",
+                    # Insertion-failure — silent vehicle drop 진단
+                    "vehicles_loaded", "vehicles_departed",
+                    "vehicles_lost_insert", "pending_insert_peak",
+                    # Green Wave 핵심 지표 — CTDE 우월성 검증용
+                    "avg_stops_per_vehicle", "avg_co2_per_vehicle",
+                    "avg_speed", "speed_cv",
+                    "per_direction_wait_ew", "per_direction_wait_ns"):
             m, s = sub[col].mean(), sub[col].std(ddof=0)
-            print(f"  {col:22s}: {m:>10.2f} ± {s:.2f}")
+            print(f"  {col:24s}: {m:>10.3f} ± {s:.3f}")
 
 
 if __name__ == "__main__":

@@ -216,6 +216,14 @@ def parse_args():
                         "high: routes_2x2_dense (~1.4대/초, 정체). "
                         "high 선택 시 --sumo-cfg 미지정이면 2x2grid_dense.sumocfg 자동 사용. "
                         "--sumo-cfg 명시 시 그것이 우선.)")
+    p.add_argument("--ctde", action="store_true",
+                   help="Centralized critic (CTDE) 모드 활성화. "
+                        "Actor 는 local obs, Critic 은 전체 agent obs concat 을 봄. "
+                        "Green Wave 형 협조 학습 유도. 체크포인트는 MAPPO_CTDE_sumo_N 에 저장.")
+    p.add_argument("--ctde-reward", type=str, default="shared",
+                   choices=["shared", "local"],
+                   help="--ctde 와 함께 사용. shared: 모든 agent 가 mean(local rewards) 받음 "
+                        "(global coordination). local: 기존 per-agent reward 유지.")
     return p.parse_args()
 
 
@@ -248,6 +256,8 @@ def main():
         "max_steps": args.max_steps,
         "tls_ids": args.tls_ids,
         "reward_mode": args.reward_mode,
+        "ctde_mode": bool(args.ctde),
+        "ctde_shared_reward": (args.ctde_reward == "shared"),
     }
     if sumo_cfg_effective:
         env_config["sumo_cfg"] = sumo_cfg_effective
@@ -272,12 +282,23 @@ def main():
     #   (B4) entropy_coeff   0.02  → 0.005  — reward magnitude 와 균형 맞춤
     #                                          (이전엔 entropy bonus 가 reward 신호와
     #                                          동일 스케일이라 exploration 편향 과도)
+    #   (B5) entropy_coeff   0.005 → 0.03  — dense traffic 의 좌회전 phase 가 학습
+    #                                          초기 부정 reward → 확률 0 으로 collapse
+    #                                          후 영구 미선택 되는 mode collapse 진단됨
+    #                                          (eval_metrics_mappo_17 에서 모든 ep act_dist
+    #                                          이 NS·EW 직진 phase 에만 집중, 좌회전 ratio
+    #                                          ~0). entropy bonus 6배 강화 (0.005 → 0.03)
+    #                                          로 4개 phase 모두 충분히 탐색하게 함.
+    #                                          (RLlib 버전 안전성 위해 schedule 대신 scalar.
+    #                                          collapse 가 풀린 뒤 fine-tune 시 0.005 로
+    #                                          낮춰 exploit 단계 별도 진행 권장.)
     #   (A3) vf_clip_param   500.0 → 10.0 → 1000.0
     #                                          10.0 으로 낮췄더니 vf_loss_unclipped=175189
     #                                          대비 vf_loss=9.89 로 VF 신호 거의 전부 소실
     #                                          → diff-waiting-time 실제 reward 스케일에 맞춰
     #                                            1000.0 으로 복원
     #   (C4) train_batch_size 4000 → 8000   — gradient noise variance 감소 (∝ 1/N)
+
     hparams = dict(
         lr=1e-4,
         gamma=0.99,
@@ -287,7 +308,7 @@ def main():
         lambda_=0.95,
         clip_param=0.2,
         vf_loss_coeff=0.5,
-        entropy_coeff=0.005,      # B4: 0.02 → 0.005
+        entropy_coeff=0.03,       # B5: 0.005 → 0.03 (mode collapse 방지, 좌회전 phase 탐색)
         vf_clip_param=1000.0,     # A3: 500 → 10 → 1000 (VF signal 복원)
     )
 
@@ -316,9 +337,33 @@ def main():
         .training(**hparams)
     )
 
+    # ── CTDE: centralized critic 모듈 주입 ───────────────────────────────
+    # Dict obs ({local, global}) 를 처리하는 커스텀 RLModule 로 교체.
+    # PPOCatalog 는 Dict obs 와 분리 인코더를 가정하지 않으므로 우회.
+    if args.ctde:
+        from ray.rllib.core.rl_module.multi_rl_module import MultiRLModuleSpec
+        from ray.rllib.core.rl_module.rl_module import RLModuleSpec
+        from ctde_module import CentralizedCriticPPOModule
+        config = config.rl_module(
+            rl_module_spec=MultiRLModuleSpec(
+                rl_module_specs={
+                    "shared_policy": RLModuleSpec(
+                        module_class=CentralizedCriticPPOModule,
+                        observation_space=obs_space,
+                        action_space=act_space,
+                        model_config={"hidden_dim": 128},
+                    )
+                }
+            )
+        )
+
     algo = config.build_algo()
     # algo.save()는 절대 경로 필요 (pyarrow URI 파싱 때문에 상대 경로 불가)
-    out_path = str(Path(args.out if args.out else _next_out_path()).resolve())
+    # CTDE 모드면 MAPPO_CTDE_sumo_N, 아니면 기존 MAPPO_sumo_N
+    algo_prefix = "MAPPO_CTDE" if args.ctde else "MAPPO"
+    out_path = str(Path(
+        args.out if args.out else _next_out_path(algo=algo_prefix)
+    ).resolve())
     Path(out_path).mkdir(parents=True, exist_ok=True)
 
     run_name = Path(out_path).name
@@ -338,6 +383,8 @@ def main():
         "yellow_time":  args.yellow_time,
         "sumo_cfg":     sumo_cfg_effective,
         "traffic":      args.traffic,
+        "ctde_mode":    bool(args.ctde),
+        "ctde_reward":  args.ctde_reward if args.ctde else None,
         # 학습 중 갱신됨
         "train_iter":        0,
         "train_total_steps": 0,
@@ -349,7 +396,10 @@ def main():
             json.dumps(train_meta, indent=2, ensure_ascii=False)
         )
 
-    print(f"학습 시작 | iters={args.num_iters} | workers={args.num_workers} "
+    ctde_tag = (
+        f"CTDE (reward={args.ctde_reward})" if args.ctde else "MAPPO (decentralized critic)"
+    )
+    print(f"학습 시작 [{ctde_tag}] | iters={args.num_iters} | workers={args.num_workers} "
           f"| tls={args.tls_ids} | reward={args.reward_mode} | seed={args.seed} | out={out_path}")
     print(f"TensorBoard: tensorboard --logdir results/tb_mappo")
 

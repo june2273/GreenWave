@@ -1,13 +1,18 @@
-# GreenWave — SUMO 교차로 신호제어 강화학습 (MAPPO)
+# GreenWave — SUMO 교차로 신호제어 강화학습 (MAPPO / CTDE)
 
 RLlib MAPPO(Multi-Agent PPO)로 SUMO 단일·다중 교차로 신호를 제어하는 실습 프레임워크.
 단일 교차로(`tls_ids=["C"]`)에서 시작해 `--tls-ids` + `--sumo-cfg`(또는 `--traffic`) 인자로 임의 SUMO 네트워크(2×2 격자 등)로 확장됩니다.
+
+**두 가지 학습 모드**:
+- **Simple MAPPO** (기본): Actor/Critic 둘 다 local obs만 사용 (decentralized critic)
+- **CTDE-MAPPO** (`--ctde`): Actor는 local obs, **Critic은 전체 교차로 global obs**를 봄 → Green Wave 형 교차로 간 협조 학습 유도
 
 **핵심 설계**:
 - SUMO TLS phase 자동 감지 → action space `Discrete(num_green)` 동적 결정 (단일/2x2grid/임의 네트워크 자동 호환)
 - SUMO program 자동 cycle 차단으로 agent action 만이 phase 전환을 결정
 - 양방향 동시 green / 좌회전 / yellow 신호를 정확히 시각화 (matplotlib)
 - 학습/평가 CSV에 메타데이터·진단 지표 자동 기록 (mode collapse, memory leak, grid lock 진단)
+- Green Wave 효과 직접 측정용 지표 (stops/vehicle, CO2/vehicle, avg_speed, speed_cv, per-direction wait)
 
 ---
 
@@ -65,8 +70,9 @@ python -c "import ray, pettingzoo, matplotlib; print('RLlib + Renderer OK')"
 ```
 GreenWave/
 ├── env_sumo_pz.py             # PettingZoo ParallelEnv — MAPPO 멀티에이전트 환경
-├── train_mappo.py             # RLlib MAPPO 학습 (단일/다중 교차로)
-├── evaluate_mappo.py          # MAPPO vs Fixed-time 성능 비교 → CSV
+├── ctde_module.py             # CTDE 커스텀 RLModule (centralized critic, 분리 encoder)
+├── train_mappo.py             # RLlib MAPPO/CTDE 학습 (--ctde 로 모드 전환)
+├── evaluate_mappo.py          # 3-way 비교 (Fixed-time / MAPPO / CTDE) → CSV
 ├── record_video_mappo.py      # MAPPO 정책 롤아웃 영상 저장 (short/continuous)
 ├── sumo_renderer.py           # matplotlib 기반 SUMO 네트워크 시각화
 ├── sumo_data/
@@ -81,7 +87,9 @@ GreenWave/
 │   └── routes_2x2_dense.rou.xml  # 양방향 + 좌회전 cross flow
 │   # single_intersection.net.xml — 첫 실행 시 netconvert로 자동 생성 (gitignored)
 ├── models/                    # 학습 체크포인트 (gitignored)
-│   └── MAPPO_sumo_N/train_metadata.json  # 학습 메타데이터 (자동 저장)
+│   ├── MAPPO_sumo_N/                # Simple MAPPO 체크포인트
+│   ├── MAPPO_CTDE_sumo_N/           # CTDE-MAPPO 체크포인트 (--ctde 학습 시 자동 분리)
+│   └── */train_metadata.json        # 학습 메타데이터 (자동 저장, ctde_mode 플래그 포함)
 ├── results/
 │   ├── eval_metrics_mappo_N.csv      # 평가 결과
 │   └── tb_mappo/MAPPO_sumo_N/        # TensorBoard 로그
@@ -153,6 +161,41 @@ SUMO TLS program 은 `setPhase()` 호출 후에도 phase duration 만료 시 자
 - 모든 에이전트가 **하나의 shared policy** 공유 → 다중 교차로로 자연 확장
 - Lane은 `trafficlight.getControlledLanes()` 로 동적 감지 — 임의 SUMO 네트워크 자동 호환
 
+### CTDE 모드 (`--ctde`) — Green Wave 협조 학습
+
+기본 모드는 Actor/Critic 모두 자기 교차로 obs 만 사용합니다 (RLlib PPO 기본). 이는 진정한 MAPPO 가 아니며 교차로 간 협조(Green Wave)를 학습하기 어렵습니다.
+
+**`--ctde` 활성화 시 변경**:
+
+```
+─────────────── Simple MAPPO (기본) ───────────────
+obs_local ──> [shared encoder] ──> π (actor)
+                              └──> V (critic)   ← 자기 교차로만 봄
+reward = per-agent local
+
+─────────────── CTDE-MAPPO (--ctde) ───────────────
+obs = Dict({"local": Box(D), "global": Box(D × N_agents)})
+
+obs["local"]  ──> [pi_encoder]  ──> π          ← 실행 시 actor 만 사용
+obs["global"] ──> [vf_encoder]  ──> V (critic) ← 학습 시 critic, 전체 교차로 봄
+reward = mean(all agents' local rewards)         ← 모두 동일 (shared)
+```
+
+| 항목 | Simple MAPPO | CTDE-MAPPO |
+|---|---|---|
+| Actor 입력 | local obs | local obs (동일) |
+| **Critic 입력** | **local obs** | **전체 agent obs concat (global)** |
+| 보상 | per-agent local | `mean(all local rewards)` (shared) 또는 local |
+| Decentralized 실행? | ✓ | ✓ (actor는 global을 절대 안 봄) |
+| Green Wave 협조 학습 | △ (어려움) | ○ (critic이 교차로 간 인과 학습) |
+| 체크포인트 경로 | `models/MAPPO_sumo_N/` | `models/MAPPO_CTDE_sumo_N/` |
+
+**구현**:
+- `ctde_module.py:CentralizedCriticPPOModule` — `DefaultPPOTorchRLModule` 상속, `pi_encoder`/`vf_encoder` 분리. `_forward_train`이 `Columns.EMBEDDINGS`를 emit 하지 않아 PPO learner가 `compute_values(batch, None)` 호출 → critic이 global 재인코딩
+- `env_sumo_pz.py:ctde_mode=True` → obs 가 `Dict({"local","global"})` 로 래핑, global은 `possible_agents` 순서로 stable concat
+- `--ctde-reward shared` (기본): 모든 agent 가 `mean()` 받음. `local`: per-agent reward 유지 (critic만 centralized)
+- **단일 교차로 + `--ctde`**: degenerate (global == local). 경고 출력 후 정상 동작 (backward compat)
+
 ---
 
 ## 실행 순서
@@ -177,6 +220,13 @@ python train_mappo.py --tls-ids 1 2 5 6 \
   --traffic high \
   --reward-mode diff-waiting-time \
   --num-iters 150 --num-workers 4 --seed 42
+
+# CTDE-MAPPO — centralized critic + shared reward (Green Wave 협조 학습)
+# 체크포인트는 models/MAPPO_CTDE_sumo_N/ 에 자동 분리 저장
+python train_mappo.py --ctde --tls-ids 1 2 5 6 \
+  --traffic high \
+  --reward-mode diff-waiting-time \
+  --num-iters 150 --num-workers 4 --seed 42
 ```
 
 #### 주요 인자
@@ -196,6 +246,8 @@ python train_mappo.py --tls-ids 1 2 5 6 \
 | `--delta-time` | 5 | env step당 진행 sim 초 |
 | `--min-green` | 10 | 최소 green 유지 시간 (초) |
 | `--yellow-time` | 2 | green→green 전환 시 yellow 시간 (초) |
+| `--ctde` | off | centralized critic (Green Wave 협조 학습) 활성화. 체크포인트는 `MAPPO_CTDE_sumo_N` |
+| `--ctde-reward` | `shared` | `--ctde` 와 함께: `shared`=mean(all rewards), `local`=per-agent reward 유지 |
 
 #### `--traffic` 사전셋 비교
 
@@ -219,12 +271,12 @@ python train_mappo.py --tls-ids 1 2 5 6 \
 | `clip_param` | `0.2` | (그대로) PPO clip ε |
 | `vf_loss_coeff` | `0.5` | (그대로) |
 | `entropy_coeff` | **`0.005`** | 0.02 → 0.005 (B4: reward 스케일과 균형) |
-| `vf_clip_param` | **`10.0`** | 500 → 10 (A3: diff-waiting-time reward 스케일 적합) |
+| `vf_clip_param` | **`1000.0`** | 500 → 10 → 1000 (A3: VF signal 복원, `loss/value`가 0 근처에 정체되던 문제 해결) |
 
 ### 2. 평가
 
 ```bash
-# MAPPO vs Fixed-time 쌍대 비교
+# 2-way 쌍대 비교 (FixedTime vs MAPPO) — 기존 동작
 # 출력: results/eval_metrics_mappo_N.csv  (N = 모델 버전 번호 자동)
 python evaluate_mappo.py --model models/MAPPO_sumo_1 --episodes 5
 
@@ -232,6 +284,14 @@ python evaluate_mappo.py --model models/MAPPO_sumo_1 --episodes 5
 python evaluate_mappo.py --model models/MAPPO_sumo_11 \
   --tls-ids 1 2 5 6 --traffic high \
   --reward-mode diff-waiting-time --episodes 5
+
+# 3-way 비교 (FixedTime vs MAPPO vs CTDE-MAPPO) — Green Wave 검증
+# --model-ctde 지정 시 CTDE 정책이 자동 추가됨
+python evaluate_mappo.py \
+  --model      models/MAPPO_sumo_11 \
+  --model-ctde models/MAPPO_CTDE_sumo_1 \
+  --tls-ids 1 2 5 6 --traffic high \
+  --reward-mode diff-waiting-time --episodes 10
 ```
 
 > **쌍대 비교**: 동일 에피소드 인덱스에 동일 SUMO seed 를 사용해 교통 수요 차이가 아닌 정책 성능 차이만 측정.
@@ -241,11 +301,13 @@ python evaluate_mappo.py --model models/MAPPO_sumo_11 \
 평가 CSV 는 3가지 섹션을 포함:
 
 1. **메타데이터 prefix 컬럼** (모든 행에 동일값):
-   `model_path`, `train_iter`, `train_total_steps`, `reward_mode`, `lr`, `entropy_coeff`, `vf_clip_param`, `train_seed`, `tls_ids`, `num_workers`, `traffic`
-2. **raw 행** (에피소드별): `algorithm` (MAPPO/FixedTime), `episode`, `seed`, 메트릭들
-3. **요약 행**: `MAPPO_mean`, `MAPPO_std`, `FixedTime_mean`, `FixedTime_std`
+   `model_path`, `model_path_ctde`, `train_iter`, `train_iter_ctde`, `train_total_steps`, `reward_mode`, `ctde_reward`, `lr`, `entropy_coeff`, `vf_clip_param`, `train_seed`, `tls_ids`, `num_workers`, `traffic`
+2. **raw 행** (에피소드별): `algorithm` (MAPPO/CTDE/FixedTime), `episode`, `seed`, 메트릭들
+3. **요약 행**: `MAPPO_mean`, `MAPPO_std`, `CTDE_mean`, `CTDE_std`, `FixedTime_mean`, `FixedTime_std` (CTDE는 `--model-ctde` 지정 시에만)
 
 #### 평가 메트릭
+
+**기존 지표 (간접 측정)**:
 
 | 컬럼 | 설명 |
 |------|------|
@@ -258,6 +320,32 @@ python evaluate_mappo.py --model models/MAPPO_sumo_11 \
 | `max_queue` | 단일 lane 최대 halting 차량 수 |
 | `teleported` | SUMO grid lock 텔레포트 차량 수 (0 이상이면 정체 한계 초과) |
 | `action_{0,1,2,3}_ratio` | 정책 action 선택 비율 (**mode collapse 진단** — 균등이면 0.25씩) |
+
+**Green Wave 직접 측정 지표 (Tier 1)**:
+
+| 컬럼 | 의미 | 좋은 값 |
+|------|------|--------|
+| `avg_stops_per_vehicle` | 차량당 평균 정지 횟수 (속도 0.1 m/s 이하 transition) | **↓ 낮을수록 좋음** (Green Wave의 정의 자체) |
+| `avg_co2_per_vehicle` | 차량당 CO2 배출량 (mg) | ↓ stop-and-go 가 줄면 즉시 감소 |
+| `avg_speed` | 평균 차량 속도 (m/s) | ↑ 부드러운 흐름 = 높음 |
+
+**Green Wave 코리도어 분석 (Tier 2)**:
+
+| 컬럼 | 의미 | 좋은 값 |
+|------|------|--------|
+| `speed_cv` | 속도 변동계수 `std(v)/mean(v)` | ↓ Green Wave면 차량들이 균일 속도 유지 |
+| `per_direction_wait_ew` | 동-서 축 평균 lane 대기시간 | ↓ 한 축에 Green Wave 형성 시 그쪽이 우수 |
+| `per_direction_wait_ns` | 남-북 축 평균 lane 대기시간 | ↓ 동일 |
+
+**기대 결과 패턴** (`--ctde` 효과 검증):
+
+| 지표 | FixedTime | MAPPO | CTDE-MAPPO |
+|------|-----------|-------|------------|
+| `avg_waiting_time` | 높음 | 중간 | **낮음** |
+| `avg_stops_per_vehicle` | 높음 (~2-3) | 중간 (~1.5) | **낮음 (~0.5-1)** |
+| `avg_co2_per_vehicle` | 높음 | 중간 | **낮음** |
+| `avg_speed` | 낮음 | 중간 | **높음** |
+| `speed_cv` | 높음 | 중간 | **낮음** |
 
 ### 3. 롤아웃 영상 저장
 
@@ -272,6 +360,8 @@ python record_video_mappo.py --model models/MAPPO_sumo_11 \
 python record_video_mappo.py --model models/MAPPO_sumo_11 \
   --mode short --fps 5
 ```
+
+> **CTDE 체크포인트 영상 녹화**: 현재 `record_video_mappo.py` 는 Simple MAPPO (Box obs) 만 지원합니다. CTDE 체크포인트 (`MAPPO_CTDE_sumo_N`) 의 정책 시각화가 필요하면 `evaluate_mappo.py` 결과 CSV 와 TensorBoard 의 `policy/action_dist` 로 정책 행동을 분석하거나, `record_video_mappo.py` 를 CTDE 모드용으로 별도 확장하세요 (`env.ctde_mode=True` + obs Dict tensor 변환).
 
 #### 비디오 인자
 
@@ -371,7 +461,31 @@ action = int(torch.argmax(
 import json
 meta = json.loads((Path("models/MAPPO_sumo_11") / "train_metadata.json").read_text())
 # {"model_name", "tls_ids", "reward_mode", "seed", "lr", "entropy_coeff",
-#  "vf_clip_param", "train_iter", "train_total_steps", "traffic", ...}
+#  "vf_clip_param", "train_iter", "train_total_steps", "traffic",
+#  "ctde_mode": False, "ctde_reward": None, ...}
+# CTDE 체크포인트는 ctde_mode=True 와 ctde_reward="shared"|"local" 가 추가됨
+```
+
+**CTDE 체크포인트 복원**:
+
+```python
+import torch
+from ray.rllib.algorithms.ppo import PPO
+from ctde_module import CentralizedCriticPPOModule  # 명시적 import 필요 (FQN 해석)
+
+algo = PPO.from_checkpoint("models/MAPPO_CTDE_sumo_1")
+module = algo.get_module("shared_policy")
+
+# CTDE 환경은 obs 가 Dict({local, global})
+obs, _ = env.reset()  # env 는 ctde_mode=True 로 생성
+action = int(torch.argmax(
+    module.forward_inference({"obs": {
+        "local":  torch.tensor(obs["tl_0"]["local"][None],  dtype=torch.float32),
+        "global": torch.tensor(obs["tl_0"]["global"][None], dtype=torch.float32),
+    }})["action_dist_inputs"],
+    dim=-1,
+).item())
+# 실행 시 actor 는 local 만 사용 (decentralized execution); global 은 critic 학습 전용
 ```
 
 ---
@@ -393,6 +507,14 @@ meta = json.loads((Path("models/MAPPO_sumo_11") / "train_metadata.json").read_te
 - `--reward-mode`, `--sumo-cfg`/`--traffic`, `--tls-ids` 는 학습·평가·영상에서 **동일하게 지정** 필요
 - 평가 CSV 의 메타 prefix 컬럼이 학습 메타데이터 (`train_metadata.json`) 를 자동 로드해 출처 추적 가능
 
+### CTDE 비교 실험 워크플로우
+1. **MAPPO 베이스라인 학습**: `python train_mappo.py --tls-ids 1 2 5 6 --traffic high --num-iters 200`  → `models/MAPPO_sumo_N/`
+2. **CTDE 학습** (같은 hyperparam 으로): `python train_mappo.py --ctde --tls-ids 1 2 5 6 --traffic high --num-iters 200`  → `models/MAPPO_CTDE_sumo_M/`
+3. **3-way 비교 평가**: `python evaluate_mappo.py --model models/MAPPO_sumo_N --model-ctde models/MAPPO_CTDE_sumo_M --tls-ids 1 2 5 6 --traffic high --episodes 10`
+4. CSV (`results/eval_metrics_mappo_N.csv`) 의 `avg_stops_per_vehicle`, `avg_co2_per_vehicle`, `speed_cv` 비교 → CTDE 가 Green Wave 효과를 학습했는지 검증
+- **CTDE 는 다중 교차로에서만 의미**: 단일 교차로 (`tls_ids=["C"]`) 에 `--ctde` 를 주면 global obs = local obs 가 되어 효과 없음 (경고 출력)
+- **공정 비교**: 두 모델은 동일한 `--seed`, `--num-iters`, `--reward-mode`, `--traffic` 으로 학습해야 critic 구조 차이만 비교 가능
+
 ### 트래픽 시나리오 선택
 - **연구/개발 단계**: `--traffic default` (빠른 학습, 약 5분/iter)
 - **본 평가**: `--traffic high` (현실적 정체, reward magnitude ↑, VF 학습 신호 풍부)
@@ -406,3 +528,13 @@ meta = json.loads((Path("models/MAPPO_sumo_11") / "train_metadata.json").read_te
 - `models/`, `results/`, `videos/` 는 gitignored
 - 참조용 샘플은 `samples/` 참조
 - 평가 출력 파일은 모델 버전 자동 반영 (`eval_metrics_mappo_N.csv`, `mappo_policy_rollout_N.mp4`)
+
+Cite:
+@misc{sumorl,
+    author = {Lucas N. Alegre},
+    title = {{SUMO-RL}},
+    year = {2019},
+    publisher = {GitHub},
+    journal = {GitHub repository},
+    howpublished = {\url{https://github.com/LucasAlegre/sumo-rl}},
+}
