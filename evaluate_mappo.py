@@ -85,17 +85,19 @@ def parse_args():
     p.add_argument("--yellow-time", type=int, default=2)
     p.add_argument("--map", type=str, default="single", choices=MAP_CHOICES,
                    help="시나리오 사전셋. 학습 시 사용한 --map 과 일치해야 함.")
-    p.add_argument("--tls-ids", nargs="+", default=None,
-                   help="TLS id 목록 (미지정 시 --map preset 사용). 학습 시와 일치해야 함.")
-    p.add_argument("--reward-mode", type=str, default="queue",
-                   choices=["queue", "diff-waiting-time", "pressure"],
-                   help="학습 시 사용한 보상 모드 (train_mappo.py와 일치해야 함)")
+    p.add_argument("--reward-mode", type=str, default="diff-waiting-time",
+                   choices=["diff-waiting-time"],
+                   help="보상 모드. 현재 diff-waiting-time 단일 모드만 지원.")
     p.add_argument("--sumo-cfg", type=str, default=None,
                    help="SUMO 설정 파일 경로 (학습 시와 동일하게 지정)")
     p.add_argument("--traffic", type=str, default="default",
                    choices=["default", "high"],
                    help="2x2grid 트래픽 강도 사전셋 (train_mappo.py 와 동일 의미). "
                         "high 선택 시 --sumo-cfg 미지정이면 2x2grid_dense.sumocfg 자동 사용.")
+    p.add_argument("--brt-weight", type=float, default=None,
+                   help="env 에 전달할 BRT 가중치. "
+                        "미지정 시 model 의 train_metadata.json 에서 자동 로드 (없으면 1.0). "
+                        "명시 시 metadata 보다 우선. baseline 비교 시 1.0 명시 권장.")
     return p.parse_args()
 
 
@@ -145,6 +147,14 @@ def _row_from_info(algorithm: str, ep: int, seed: int, info: dict) -> dict:
         "speed_cv":              info.get("speed_cv",              np.nan),
         "per_direction_wait_ew": info.get("per_direction_wait_ew", np.nan),
         "per_direction_wait_ns": info.get("per_direction_wait_ns", np.nan),
+        # BRT 우선처리 평가용 — vClass=bus 와 일반 차량 분리 metric.
+        # 비-BRT 시나리오는 brt_seen=0 / avg_wait_brt=0.0 (자연 표시).
+        "avg_wait_brt":  info.get("avg_wait_brt",  np.nan),
+        "avg_wait_car":  info.get("avg_wait_car",  np.nan),
+        "avg_speed_brt": info.get("avg_speed_brt", np.nan),
+        "avg_speed_car": info.get("avg_speed_car", np.nan),
+        "brt_seen":      info.get("brt_seen",      np.nan),
+        "car_seen":      info.get("car_seen",      np.nan),
     }
     row.update(_action_ratios(info.get("action_counts", [])))
     return row
@@ -190,19 +200,27 @@ def main():
                 "ctde_mode=True 가 없습니다. CTDE 체크포인트가 맞는지 확인하세요."
             )
 
-    # --map 으로부터 sumo_cfg / tls_ids 결정 (사용자 명시값 우선)
+    # --map 으로부터 sumo_cfg / tls_ids 결정 (preset 사용)
     sumo_cfg_effective, tls_ids_effective = resolve_map_args(
         map_name=args.map,
         sumo_cfg_arg=args.sumo_cfg,
-        tls_ids_arg=args.tls_ids,
+        tls_ids_arg=None,
         traffic=args.traffic,
     )
-    args.tls_ids = tls_ids_effective
     print(f"[map={args.map}] sumo_cfg={sumo_cfg_effective} tls_ids={tls_ids_effective}")
 
     # 학습 시 사용한 map 과 eval map 이 다르면 경고
     if train_meta.get("map") and train_meta["map"] != args.map:
         print(f"[warning] train map='{train_meta['map']}' vs eval map='{args.map}' 불일치")
+
+    # BRT 가중치 결정: CLI 명시값 > train_metadata > default(1.0)
+    # 학습 시와 동일한 reward 환경에서 평가하기 위함. 베이스라인 비교 시
+    # --brt-weight 1.0 명시 권장.
+    if args.brt_weight is not None:
+        brt_weight_effective = float(args.brt_weight)
+    else:
+        brt_weight_effective = float(train_meta.get("brt_weight", 1.0))
+    print(f"[brt_weight={brt_weight_effective}]")
 
     env_kwargs = dict(
         use_gui=False,
@@ -210,8 +228,9 @@ def main():
         min_green=args.min_green,
         yellow_time=args.yellow_time,
         max_steps=args.max_steps,
-        tls_ids=args.tls_ids,
+        tls_ids=tls_ids_effective,
         reward_mode=args.reward_mode,
+        brt_weight=brt_weight_effective,
     )
     if sumo_cfg_effective:
         env_kwargs["sumo_cfg"] = sumo_cfg_effective
@@ -242,6 +261,9 @@ def main():
         # Green Wave 지표 — 모든 algorithm 에 공통 기록
         "avg_stops_per_vehicle", "avg_co2_per_vehicle", "avg_speed",
         "speed_cv", "per_direction_wait_ew", "per_direction_wait_ns",
+        # BRT 우선처리 metric — BRT 시나리오에서 BRT vs 일반 차량 분리 분석
+        "avg_wait_brt", "avg_wait_car", "avg_speed_brt", "avg_speed_car",
+        "brt_seen", "car_seen",
         *[f"action_{i}_ratio" for i in range(num_green)],
     ]
 
@@ -390,10 +412,11 @@ def main():
         "entropy_coeff":     train_meta.get("entropy_coeff", ""),
         "vf_clip_param":     train_meta.get("vf_clip_param", ""),
         "switch_penalty":    train_meta.get("switch_penalty", ""),
+        "brt_weight":        brt_weight_effective,
         "min_green":         train_meta.get("min_green", args.min_green),
         "map":               train_meta.get("map", args.map),
         "train_seed":        train_meta.get("seed", ""),
-        "tls_ids":           "_".join(args.tls_ids),
+        "tls_ids":           "_".join(tls_ids_effective),
         "num_workers":       train_meta.get("num_workers", ""),
         "traffic":           train_meta.get("traffic", args.traffic),
     }

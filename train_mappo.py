@@ -2,7 +2,7 @@
 Ray RLlib MAPPO — SUMO 교차로 신호제어 학습
 
 단일 교차로(tl_0 하나)에서도 Parallel PettingZoo + shared policy 구조를 사용하므로
-다중 교차로(tl_0, tl_1, ...) 확장 시 tls_ids 인자만 추가하면 됩니다.
+다중 교차로 확장은 --map preset 으로 처리됩니다 (single / 2x2 / 2x2-brt / 3x2 / 3x2-brt).
 """
 import argparse
 import json
@@ -136,6 +136,13 @@ def _build_callback():
                                  "vehicles_lost_insert",
                                  float(last_info.get("vehicles_lost_insert", 0)))
 
+                # BRT 우선처리 metric (BRT 시나리오에서만 의미. 그 외는 0.0)
+                for k in ("avg_wait_brt", "avg_wait_car",
+                          "avg_speed_brt", "avg_speed_car"):
+                    if k in last_info:
+                        self._log_metric(episode, metrics_logger,
+                                         k, float(last_info.get(k, 0.0)))
+
                 counts = last_info.get("action_counts", [])
                 total = sum(counts) or 1
                 # 4 하드코딩 대신 실제 action 개수 사용 (num_green 가변 대응)
@@ -213,19 +220,23 @@ def parse_args():
                    help="시나리오 사전셋. single=단일교차로, 2x2=sumo-rl 2x2, "
                         "2x2-brt=좌측 BRT corridor, 3x2=2col x 3row, "
                         "3x2-brt=3x2+좌측 BRT corridor. "
-                        "--tls-ids / --sumo-cfg 명시 시 그것이 우선.")
-    # --tls-ids 명시 안 하면 --map preset 에서 결정. default None 이 sentinel.
-    p.add_argument("--tls-ids", nargs="+", default=None,
-                   help="SUMO 네트워크 내 TLS id 목록 (미지정 시 --map preset 값 사용)")
+                        "--sumo-cfg 명시 시 그것이 우선.")
     p.add_argument("--seed", type=int, default=42,
                    help="전역 랜덤 시드 (random/numpy/torch/SUMO 일괄 설정)")
-    p.add_argument("--reward-mode", type=str, default="queue",
-                   choices=["queue", "diff-waiting-time", "pressure"],
-                   help="보상 함수 모드 (queue: mean+max 패널티, "
-                        "diff-waiting-time: 대기시간 변화량, pressure: 처리량 차이)")
+    p.add_argument("--reward-mode", type=str, default="diff-waiting-time",
+                   choices=["diff-waiting-time"],
+                   help="보상 함수 모드 (diff-waiting-time: 이전 step 누적대기시간 - 현재) / 10. "
+                        "현재 단일 모드만 지원 (queue/pressure 는 cleanup 으로 제거됨).")
     p.add_argument("--switch-penalty", type=float, default=0.3,
                    help="phase switch 마다 reward 에서 빼는 페널티 (oscillation 억제). "
                         "0 = 비활성, 0.3 = yellow 1sec 분량 queue 손실 추정 (default).")
+    p.add_argument("--brt-weight", type=float, default=1.0,
+                   help="BRT(vClass=bus) 차량 waiting time 가중치. "
+                        "1.0 = 가중치 비활성 (baseline, 기존 동작과 bit-identical). "
+                        "BRT 시나리오(2x2-brt, 3x2-brt) 학습 시 1.5~3.0 권장. "
+                        "reward_mode='diff-waiting-time' 에서만 reward 에 반영됨. "
+                        "평가 metric (avg_wait_brt/car, avg_speed_brt/car) 분리는 "
+                        "이 값과 무관하게 항상 기록.")
     p.add_argument("--sumo-cfg", type=str, default=None,
                    help="SUMO 설정 파일 경로 (미지정 시 기본 단일교차로 사용)")
     p.add_argument("--traffic", type=str, default="default",
@@ -257,14 +268,13 @@ def main():
     register_env("sumo_pz", _make_env)
     ray.init(ignore_reinit_error=True)
 
-    # --map 으로부터 sumo_cfg / tls_ids 결정 (사용자 명시값 우선)
+    # --map 으로부터 sumo_cfg / tls_ids 결정 (preset 사용)
     sumo_cfg_effective, tls_ids_effective = resolve_map_args(
         map_name=args.map,
         sumo_cfg_arg=args.sumo_cfg,
-        tls_ids_arg=args.tls_ids,
+        tls_ids_arg=None,
         traffic=args.traffic,
     )
-    args.tls_ids = tls_ids_effective  # train_meta 저장용 동기화
     print(f"[map={args.map}] sumo_cfg={sumo_cfg_effective} tls_ids={tls_ids_effective}")
 
     env_config = {
@@ -273,11 +283,12 @@ def main():
         "min_green": args.min_green,
         "yellow_time": args.yellow_time,
         "max_steps": args.max_steps,
-        "tls_ids": args.tls_ids,
+        "tls_ids": tls_ids_effective,
         "reward_mode": args.reward_mode,
         "ctde_mode": bool(args.ctde),
         "ctde_shared_reward": (args.ctde_reward == "shared"),
         "switch_penalty": args.switch_penalty,
+        "brt_weight": args.brt_weight,
     }
     if sumo_cfg_effective:
         env_config["sumo_cfg"] = sumo_cfg_effective
@@ -402,7 +413,7 @@ def main():
         "model_name":   run_name,
         "model_path":   out_path,
         "map":          args.map,
-        "tls_ids":      args.tls_ids,
+        "tls_ids":      tls_ids_effective,
         "reward_mode":  args.reward_mode,
         "seed":         args.seed,
         "num_workers":  args.num_workers,
@@ -413,6 +424,7 @@ def main():
         "sumo_cfg":     sumo_cfg_effective,
         "traffic":      args.traffic,
         "switch_penalty": args.switch_penalty,
+        "brt_weight":   args.brt_weight,
         "ctde_mode":    bool(args.ctde),
         "ctde_reward":  args.ctde_reward if args.ctde else None,
         # 학습 중 갱신됨
@@ -430,7 +442,7 @@ def main():
         f"CTDE (reward={args.ctde_reward})" if args.ctde else "MAPPO (decentralized critic)"
     )
     print(f"학습 시작 [{ctde_tag}] | iters={args.num_iters} | workers={args.num_workers} "
-          f"| tls={args.tls_ids} | reward={args.reward_mode} | seed={args.seed} | out={out_path}")
+          f"| tls={tls_ids_effective} | reward={args.reward_mode} | seed={args.seed} | out={out_path}")
     print(f"TensorBoard: tensorboard --logdir results/tb_mappo")
 
     try:
@@ -455,6 +467,8 @@ def main():
                 ("loss/policy",      "policy_loss"),
                 ("loss/value",       "vf_loss"),
                 ("loss/entropy",     "entropy"),
+                # PPO KL divergence — policy update 과격함 진단 (>0.05 면 lr/clip 조정)
+                ("policy/kl_mean",   "mean_kl_loss"),
                 # grad_norm: RLlib 2.10+ 가 자동 기록하는 키들 중 발견되는 것을 사용
                 ("learner/grad_norm_global",      "gradients_default_optimizer_global_norm"),
                 ("learner/grad_norm_policy",      "gradients_policy_default_optimizer_global_norm"),

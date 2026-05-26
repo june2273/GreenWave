@@ -262,5 +262,5 @@ results/
 videos/
 
 # Auto-generated SUMO network (rebuilt by _maybe_build_network() at runtime)
-sumo_data/single_intersection.net.xml
+sumo_data/single/single_intersection.net.xml
 

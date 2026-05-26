@@ -49,9 +49,8 @@ class SumoParallelEnv(ParallelEnv):
                 density/queue는 lane capacity 기반 [0,1] 정규화.
 
     보상(reward_mode):
-      "queue"            : -(mean(queues)+max(queues))/10 + throughput×0.5
-      "diff-waiting-time": 누적 대기시간 변화량 (SUMO-RL 검증 방식)
-      "pressure"         : 출력 lane 차량 수 - 입력 lane 차량 수
+      "diff-waiting-time": (이전 step 누적 대기시간 - 현재) / 10. 단일 모드.
+        BRT 시나리오에서 brt_weight 가 vClass=bus 차량에만 곱해짐.
     """
 
     metadata = {
@@ -60,7 +59,7 @@ class SumoParallelEnv(ParallelEnv):
         "name": "sumo_intersection_v0",
     }
 
-    REWARD_MODES: List[str] = ["queue", "diff-waiting-time", "pressure"]
+    REWARD_MODES: List[str] = ["diff-waiting-time"]
 
     def __init__(
         self,
@@ -70,11 +69,12 @@ class SumoParallelEnv(ParallelEnv):
         yellow_time: int = 2,
         min_green: int = 10,
         max_steps: int = 3600,
-        reward_mode: str = "queue",
+        reward_mode: str = "diff-waiting-time",
         tls_ids: Optional[List[str]] = None,
         ctde_mode: bool = False,
         ctde_shared_reward: bool = True,
         switch_penalty: float = 0.3,
+        brt_weight: float = 1.0,
     ):
         self.base_dir = Path(__file__).resolve().parent
         self.sumo_data_dir = self.base_dir / "sumo_data"
@@ -85,7 +85,7 @@ class SumoParallelEnv(ParallelEnv):
                     f"SUMO 설정 파일을 찾을 수 없습니다: {self.sumo_cfg}"
                 )
         else:
-            self.sumo_cfg = self.sumo_data_dir / "single.sumocfg"
+            self.sumo_cfg = self.sumo_data_dir / "single" / "single.sumocfg"
             self._maybe_build_network()
 
         if reward_mode not in self.REWARD_MODES:
@@ -107,6 +107,13 @@ class SumoParallelEnv(ParallelEnv):
         # 정책이 switch 직후 reward 회복으로 oscillation 학습하던 문제 해결.
         # 0.3 ≈ yellow 1초당 queue 1대 손실 수준. 과하면 phase 고착화.
         self.switch_penalty = float(switch_penalty)
+
+        # BRT(vClass=bus) 차량 waiting time 가중치.
+        # 1.0 = 비활성 (모든 차량 동일 가중치, 기존 동작과 bit-identical).
+        # reward_mode="diff-waiting-time" 에서만 reward 계산에 반영.
+        # 1.5~3.0 권장; BRT 시나리오(2x2-brt, 3x2-brt)에서만 의미.
+        # 평가 metric (avg_wait_brt/car, avg_speed_brt/car) 는 brt_weight 와 무관하게 항상 기록.
+        self.brt_weight = float(brt_weight)
 
         # SUMO TLS id → PettingZoo agent id 매핑
         self._tls_ids: List[str] = tls_ids if tls_ids is not None else ["C"]
@@ -216,6 +223,18 @@ class SumoParallelEnv(ParallelEnv):
         self._episode_wait_ew_count: int = 0
         self._episode_wait_ns_count: int = 0
 
+        # BRT 우선처리 평가용 — vClass=bus 와 일반 차량 wait/speed 를 분리 누적.
+        # _simulate_seconds 의 vehicle loop 에서 분기 1회로 통합 채움.
+        # 단위는 기존 episode_speed_sum 과 동일 (스텝×차량 표본).
+        self._episode_brt_wait_sum: float = 0.0
+        self._episode_brt_wait_count: int = 0
+        self._episode_car_wait_sum: float = 0.0
+        self._episode_car_wait_count: int = 0
+        self._episode_brt_speed_sum: float = 0.0
+        self._episode_brt_speed_count: int = 0
+        self._episode_car_speed_sum: float = 0.0
+        self._episode_car_speed_count: int = 0
+
         # 네트워크 시각화 렌더러
         self._renderer = SumoRenderer(self.sumo_cfg)
 
@@ -294,7 +313,8 @@ class SumoParallelEnv(ParallelEnv):
     # ------------------------------------------------------------------
 
     def _maybe_build_network(self) -> None:
-        net_file = self.sumo_data_dir / "single_intersection.net.xml"
+        single_dir = self.sumo_data_dir / "single"
+        net_file = single_dir / "single_intersection.net.xml"
         if net_file.exists():
             return
         netconvert = shutil.which("netconvert")
@@ -303,16 +323,16 @@ class SumoParallelEnv(ParallelEnv):
                 "single_intersection.net.xml이 없고 netconvert도 찾을 수 없습니다."
             )
         tmp_fd, tmp_path = tempfile.mkstemp(
-            suffix=".net.xml", dir=self.sumo_data_dir
+            suffix=".net.xml", dir=single_dir
         )
         os.close(tmp_fd)
         try:
             cmd = [
                 netconvert,
-                "--node-files", str(self.sumo_data_dir / "nodes.nod.xml"),
-                "--edge-files", str(self.sumo_data_dir / "edges.edg.xml"),
-                "--connection-files", str(self.sumo_data_dir / "connections.con.xml"),
-                "--tllogic-files", str(self.sumo_data_dir / "tls.tll.xml"),
+                "--node-files", str(single_dir / "nodes.nod.xml"),
+                "--edge-files", str(single_dir / "edges.edg.xml"),
+                "--connection-files", str(single_dir / "connections.con.xml"),
+                "--tllogic-files", str(single_dir / "tls.tll.xml"),
                 "-o", tmp_path,
             ]
             result = subprocess.run(cmd, capture_output=True, text=True)
@@ -531,9 +551,10 @@ class SumoParallelEnv(ParallelEnv):
             for veh_id in self.conn.vehicle.getIDList():
                 if veh_id not in self._depart_time:
                     self._depart_time[veh_id] = self.sim_step
-                self._latest_waiting[veh_id] = (
+                wait_acc = float(
                     self.conn.vehicle.getAccumulatedWaitingTime(veh_id)
                 )
+                self._latest_waiting[veh_id] = wait_acc
                 # Green Wave Tier 1 지표: speed + CO2 + 정지 횟수
                 speed = float(self.conn.vehicle.getSpeed(veh_id))
                 self._episode_speed_sum += speed
@@ -548,6 +569,25 @@ class SumoParallelEnv(ParallelEnv):
                         self._vehicle_stop_count.get(veh_id, 0) + 1
                     )
                 self._vehicle_prev_speed[veh_id] = speed
+
+                # BRT/일반 차량 분리 누적 (BRT 우선처리 평가 metric).
+                # vClass 가 "bus" 면 BRT, 그 외 ("passenger" 등) 일반 차량.
+                # getVehicleClass 1회 추가 호출만 발생. 시나리오와 무관하게 항상 동작 —
+                # 비-BRT 시나리오(single/2x2/3x2)는 brt_count 가 0 으로 누적되므로
+                # info 의 avg_wait_brt 는 0.0 으로 자연스럽게 표시됨.
+                is_brt = (
+                    self.conn.vehicle.getVehicleClass(veh_id) == "bus"
+                )
+                if is_brt:
+                    self._episode_brt_wait_sum += wait_acc
+                    self._episode_brt_wait_count += 1
+                    self._episode_brt_speed_sum += speed
+                    self._episode_brt_speed_count += 1
+                else:
+                    self._episode_car_wait_sum += wait_acc
+                    self._episode_car_wait_count += 1
+                    self._episode_car_speed_sum += speed
+                    self._episode_car_speed_count += 1
 
             for veh_id in self.conn.simulation.getArrivedIDList():
                 self._throughput += 1
@@ -734,6 +774,16 @@ class SumoParallelEnv(ParallelEnv):
         self._episode_wait_ew_count = 0
         self._episode_wait_ns_count = 0
 
+        # BRT/car 분리 누적 초기화
+        self._episode_brt_wait_sum = 0.0
+        self._episode_brt_wait_count = 0
+        self._episode_car_wait_sum = 0.0
+        self._episode_car_wait_count = 0
+        self._episode_brt_speed_sum = 0.0
+        self._episode_brt_speed_count = 0
+        self._episode_car_speed_sum = 0.0
+        self._episode_car_speed_count = 0
+
         # 초기 phase: 각 agent의 green_phases[0] 으로 강제 설정 (자동 cycle 차단)
         for agent in self.agents:
             initial_phase = self._per_agent_green_phases[agent][0]
@@ -766,7 +816,6 @@ class SumoParallelEnv(ParallelEnv):
         self._episode_phase_switches += sum(switching.values())
 
         done = False
-        throughput_before = self._throughput
 
         # 4. yellow 전환: 현재 green→다음yellow 가 매핑된 agent만 yellow 적용
         yellow_applied = False
@@ -811,8 +860,6 @@ class SumoParallelEnv(ParallelEnv):
         avg_travel = (
             float(np.mean(self._completed_travel)) if self._completed_travel else 0.0
         )
-        step_throughput = self._throughput - throughput_before
-
         local_obs: Dict[str, np.ndarray] = {}
         rewards, terminations, truncations, infos = {}, {}, {}, {}
         for agent in self.agents:
@@ -821,31 +868,30 @@ class SumoParallelEnv(ParallelEnv):
             # ── 보상 함수 ─────────────────────────────────────────────
             lanes = self._per_agent_lanes[agent]
 
-            if self.reward_mode == "diff-waiting-time":
-                # B1: 정규화 /100 → /10 — reward magnitude 10배 ↑로 VF 학습 신호 강화
-                # (free flow 에선 ~0.5, 정체에선 ~5+ 범위가 되어 VF variance 확보)
+            # diff-waiting-time: (이전 step 누적대기시간 − 현재) / 10.
+            # BRT 가중치: brt_weight > 1.0 이면 vClass=bus 차량 waiting time 만 w 배 가중.
+            # brt_weight=1.0 일 때는 lane.getWaitingTime 합과 수학적으로 동일 (fast path).
+            if self.brt_weight == 1.0:
                 current_wait = sum(
                     self.conn.lane.getWaitingTime(ln) for ln in lanes
                 ) / 10.0
-                reward = self._last_wait_measure.get(agent, current_wait) - current_wait
-                self._last_wait_measure[agent] = current_wait
+            else:
+                weighted = 0.0
+                for ln in lanes:
+                    for vid in self.conn.lane.getLastStepVehicleIDs(ln):
+                        w = (
+                            self.brt_weight
+                            if self.conn.vehicle.getVehicleClass(vid) == "bus"
+                            else 1.0
+                        )
+                        weighted += w * float(
+                            self.conn.vehicle.getAccumulatedWaitingTime(vid)
+                        )
+                current_wait = weighted / 10.0
+            reward = self._last_wait_measure.get(agent, current_wait) - current_wait
+            self._last_wait_measure[agent] = current_wait
 
-            elif self.reward_mode == "pressure":
-                out_lanes = self._per_agent_out_lanes.get(agent, [])
-                reward = float(
-                    sum(self.conn.lane.getLastStepVehicleNumber(ln) for ln in out_lanes)
-                    - sum(self.conn.lane.getLastStepVehicleNumber(ln) for ln in lanes)
-                )
-
-            else:  # "queue" (default) — obs 구조가 바뀌어 직접 lane 조회
-                queues = np.array([
-                    self.conn.lane.getLastStepHaltingNumber(ln) for ln in lanes
-                ], dtype=np.float32)
-                queue_penalty = (float(queues.mean()) + float(queues.max())) / 10.0
-                throughput_bonus = step_throughput * 0.5
-                reward = -queue_penalty + throughput_bonus
-
-            # 옵션 A: switch 시 추가 페널티 — oscillation 정책 억제
+            # switch_penalty: oscillation 정책 억제 (모든 mode 공통)
             if switching[agent] and self.switch_penalty != 0.0:
                 reward -= self.switch_penalty
 
@@ -870,6 +916,25 @@ class SumoParallelEnv(ParallelEnv):
         wait_ns = (
             self._episode_wait_ns_sum / self._episode_wait_ns_count
             if self._episode_wait_ns_count > 0 else 0.0
+        )
+
+        # BRT 우선처리 평가용 — vClass=bus 와 일반 차량 분리 평균.
+        # 표본이 없으면 0.0 (예: single/2x2/3x2 시나리오 → brt_count=0).
+        avg_wait_brt = (
+            self._episode_brt_wait_sum / self._episode_brt_wait_count
+            if self._episode_brt_wait_count > 0 else 0.0
+        )
+        avg_wait_car = (
+            self._episode_car_wait_sum / self._episode_car_wait_count
+            if self._episode_car_wait_count > 0 else 0.0
+        )
+        avg_speed_brt = (
+            self._episode_brt_speed_sum / self._episode_brt_speed_count
+            if self._episode_brt_speed_count > 0 else 0.0
+        )
+        avg_speed_car = (
+            self._episode_car_speed_sum / self._episode_car_speed_count
+            if self._episode_car_speed_count > 0 else 0.0
         )
 
         # CTDE 공유 보상 — 모든 agent 가 동일한 mean(reward) 받음
@@ -915,6 +980,15 @@ class SumoParallelEnv(ParallelEnv):
                 "speed_cv":              float(speed_cv),
                 "per_direction_wait_ew": float(wait_ew),
                 "per_direction_wait_ns": float(wait_ns),
+                # BRT 우선처리 평가용 — vClass=bus vs 일반 차량 분리 metric.
+                # brt_weight 적용 여부와 무관하게 항상 기록 (baseline 비교 용이).
+                # 비-BRT 시나리오는 brt_seen=0 / avg_wait_brt=0.0 으로 자연 표시.
+                "avg_wait_brt":  float(avg_wait_brt),
+                "avg_wait_car":  float(avg_wait_car),
+                "avg_speed_brt": float(avg_speed_brt),
+                "avg_speed_car": float(avg_speed_car),
+                "brt_seen":      int(self._episode_brt_wait_count),
+                "car_seen":      int(self._episode_car_wait_count),
             }
 
         observations = self._wrap_obs(local_obs)

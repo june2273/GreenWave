@@ -63,17 +63,18 @@ def parse_args():
     p.add_argument("--yellow-time", type=int, default=2)
     p.add_argument("--map", type=str, default="single", choices=MAP_CHOICES,
                    help="시나리오 사전셋. 학습 시 사용한 --map 과 일치해야 함.")
-    p.add_argument("--tls-ids", nargs="+", default=None,
-                   help="TLS id 목록 (미지정 시 --map preset 사용)")
-    p.add_argument("--reward-mode", type=str, default="queue",
-                   choices=["queue", "diff-waiting-time", "pressure"],
-                   help="학습 시 사용한 보상 모드 (train_mappo.py와 일치해야 함)")
+    p.add_argument("--reward-mode", type=str, default="diff-waiting-time",
+                   choices=["diff-waiting-time"],
+                   help="보상 모드. 현재 diff-waiting-time 단일 모드만 지원.")
     p.add_argument("--sumo-cfg", type=str, default=None,
                    help="SUMO 설정 파일 경로 (학습 시와 동일하게 지정)")
     p.add_argument("--traffic", type=str, default="default",
                    choices=["default", "high"],
                    help="2x2grid 트래픽 강도 사전셋 (default/high). "
                         "high 선택 시 --sumo-cfg 미지정이면 2x2grid_dense.sumocfg 자동 사용.")
+    p.add_argument("--brt-weight", type=float, default=1.0,
+                   help="env 에 전달할 BRT 가중치 (학습 시와 동일 권장). "
+                        "영상 자체에는 영향 없음 (정책 추론만), reward 진단용.")
     return p.parse_args()
 
 
@@ -85,14 +86,13 @@ def main():
     algo = PPO.from_checkpoint(str(Path(args.model).resolve()))
     module = algo.get_module("shared_policy")
 
-    # --map 으로부터 sumo_cfg / tls_ids 결정 (사용자 명시값 우선)
+    # --map 으로부터 sumo_cfg / tls_ids 결정 (preset 사용)
     sumo_cfg_effective, tls_ids_effective = resolve_map_args(
         map_name=args.map,
         sumo_cfg_arg=args.sumo_cfg,
-        tls_ids_arg=args.tls_ids,
+        tls_ids_arg=None,
         traffic=args.traffic,
     )
-    args.tls_ids = tls_ids_effective
     print(f"[map={args.map}] sumo_cfg={sumo_cfg_effective} tls_ids={tls_ids_effective}")
 
     env_kwargs = dict(
@@ -101,8 +101,9 @@ def main():
         min_green=args.min_green,
         yellow_time=args.yellow_time,
         max_steps=args.max_steps,
-        tls_ids=args.tls_ids,
+        tls_ids=tls_ids_effective,
         reward_mode=args.reward_mode,
+        brt_weight=args.brt_weight,
     )
     if sumo_cfg_effective:
         env_kwargs["sumo_cfg"] = sumo_cfg_effective

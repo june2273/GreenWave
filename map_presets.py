@@ -13,7 +13,7 @@ MAP_CHOICES = ["single", "2x2", "2x2-brt", "3x2", "3x2-brt"]
 # sumo_cfg 는 GreenWave/ 기준 상대경로; tls_ids 는 SUMO 네트워크의 TLS id 목록.
 MAP_PRESETS = {
     "single":  {"sumo_cfg": None,                                "tls_ids": ["C"]},
-    "2x2":     {"sumo_cfg": "sumo_data/2x2grid.sumocfg",         "tls_ids": ["1","2","5","6"]},
+    "2x2":     {"sumo_cfg": "sumo_data/2x2/2x2grid.sumocfg",     "tls_ids": ["1","2","5","6"]},
     "2x2-brt": {"sumo_cfg": "sumo_data/2x2_brt/2x2_brt.sumocfg", "tls_ids": ["1","2","5","6"]},
     "3x2":     {"sumo_cfg": "sumo_data/3x2/3x2.sumocfg",         "tls_ids": ["1","2","3","4","5","6"]},
     "3x2-brt": {"sumo_cfg": "sumo_data/3x2_brt/3x2_brt.sumocfg", "tls_ids": ["1","2","3","4","5","6"]},
@@ -49,7 +49,7 @@ def resolve_map_args(
     if sumo_cfg_arg:
         sumo_cfg = sumo_cfg_arg
     elif map_name == "2x2" and traffic == "high":
-        sumo_cfg = "sumo_data/2x2grid_dense.sumocfg"
+        sumo_cfg = "sumo_data/2x2/2x2grid_dense.sumocfg"
     else:
         sumo_cfg = preset["sumo_cfg"]
 
