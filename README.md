@@ -214,7 +214,7 @@ tensorboard --logdir results/tb_mappo
 | 지표 | 수렴 신호 |
 |------|---------|
 | `reward/mean` | 초기 음수 → 점진 상승 후 plateau |
-| `loss/entropy` | 천천히 ↓ (0.5~1.5 → 0.1~0.5). 급격히 0이면 mode collapse |
+| `loss/entropy` | 천천히 ↓ (0.5 ~ 1.5 → 0.1 ~ 0.5). 급격히 0이면 mode collapse |
 | `policy/kl_mean` | < 0.02 정상. > 0.05이면 lr / clip_param 조정 필요 |
 | `policy/action_dist/action_{0..3}` | 4개 모두 5% 이상. 한쪽 >90%이면 mode collapse |
 
