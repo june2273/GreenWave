@@ -13,17 +13,13 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 
 
-# 큐 카테고리별 색 — movement 종류로 즉시 구분 가능 (큐 길이 색은 제거).
-# - "Th" (직진/우회전 통합) → 주황
-# - "Lt" (좌회전) → 초록
-# - "BRT" (버스 전용 차선) → 파랑
-QUEUE_CATEGORY_COLOR = {
-    "Th":  "#f39c12",
-    "Lt":  "#2ecc71",
-    "BRT": "#3498db",
-}
-# 평행 막대 배치 시 일정 순서 유지 (왼쪽→오른쪽 또는 위→아래 일관성)
-QUEUE_CATEGORY_ORDER = ["Th", "Lt", "BRT"]
+def _queue_color(q: float) -> str:
+    """큐 길이 → 색상 (초록 ≤3 / 주황 ≤7 / 빨강 ≥8). 단순 단계별 강조."""
+    if q <= 3:
+        return "#2ecc71"
+    if q <= 7:
+        return "#f39c12"
+    return "#e74c3c"
 
 
 # SUMO connection 의 dir 속성 → 사람이 읽기 쉬운 movement 약어
@@ -135,15 +131,16 @@ class SumoRenderer:
     def _scale(self):
         (xmin, ymin), (xmax, ymax) = self._net.getBBoxXY()
         sz = max(xmax - xmin, ymax - ymin)
-        IO   = sz * 0.065   # 중심 → 신호등 거리
-        RA   = sz * 0.022   # 활성 신호등 반지름
-        RI   = sz * 0.015   # 비활성 신호등 반지름
-        # 큐 막대 최대 길이: 원본 IO×0.90 ≈ sz×0.058 의 ~3배.
-        # (이전 5배(sz×0.30)는 queue=3 만 돼도 인접 교차로 segment 절반을 차지해 과장됨)
-        BLEN = sz * 0.18
-        # 큐 막대 너비 — Th/Lt/BRT 평행 배치를 위해 얇게 (3개 막대 + spacing 고려).
-        # 너무 얇으면 시인성 떨어지므로 sz×0.006 (이전 sz×0.013 의 약 절반).
-        BW   = sz * 0.006
+        # IO 축소 (0.065 → 0.05): 신호등 + 큐 막대를 junction 가까이 모아
+        # 인접 교차로 사이에 시각적 여백 확보.
+        IO   = sz * 0.05
+        RA   = sz * 0.020   # 활성 신호등 반지름 (약간 축소)
+        RI   = sz * 0.014
+        # 큐 막대 길이 축소 (0.18 → 0.10): 단일 막대로 복귀했으므로 짧게도
+        # 충분히 인지 가능. 인접 교차로 간 시각 분리 강화.
+        BLEN = sz * 0.10
+        # 단일 막대 → 다소 두껍게 (이전 평행 3개 sz×0.006 → 단일 sz×0.014).
+        BW   = sz * 0.014
         return IO, RA, RI, BLEN, BW, (xmin, ymin, xmax, ymax)
 
     # ── Phase → 활성 방향 매핑 (옵션 B: net.xml 직접 파싱) ─────────────────────
@@ -376,7 +373,7 @@ class SumoRenderer:
                 continue
             xs, ys = zip(*pts)
             ax.plot(xs, ys, color=self.ROAD_COLOR,
-                    linewidth=4, zorder=1, solid_capstyle="round")
+                    linewidth=7, zorder=1, solid_capstyle="round")
             # 이 edge 의 BRT lane (있다면) 별도 파란 선으로 강조
             for lane in edge.getLanes():
                 if lane.getID() not in self._brt_lanes:
@@ -386,7 +383,7 @@ class SumoRenderer:
                     continue
                 lxs, lys = zip(*lpts)
                 ax.plot(lxs, lys, color=self.BRT_LANE_CLR,
-                        linewidth=2.0, alpha=0.85,
+                        linewidth=3.5, alpha=0.85,
                         zorder=1.5, solid_capstyle="round")
 
         # ── 교차로 ────────────────────────────────────────────────────────────
@@ -473,12 +470,10 @@ class SumoRenderer:
                             zorder=5, markeredgewidth=0)
 
             # ── ② 큐 막대 ────────────────────────────────────────────────────
-            # env 가 전달한 lane별 raw 큐를 (방향, movement) 별로 집계.
-            #   dir_queue       : {dir: total_q}        (막대 길이 — 같은 방향 합산)
-            #   dir_by_movement : {dir: {mov: q}}       (라벨 분리 — 직진/좌회전 등)
+            # 방향별 총 큐 합산 → 단일 막대 (이전 3-카테고리 평행 분리는 가독성
+            # 문제로 원복). 막대 색은 큐 길이 임계값 기반 (초록/주황/빨강).
             _DVEC = {"N": (0,1), "S": (0,-1), "E": (1,0), "W": (-1,0)}
             dir_queue: Dict[str, float] = {}
-            dir_by_movement: Dict[str, Dict[str, float]] = {}
 
             if queue_per_lane is not None and agent in queue_per_lane:
                 qs  = queue_per_lane[agent]
@@ -487,24 +482,19 @@ class SumoRenderer:
                     adir = self._cached_lane_dir(ln, nid)
                     if adir not in self.DIRS:
                         continue
-                    amov = self._cached_lane_movement(ln, nid)
                     dir_queue[adir] = dir_queue.get(adir, 0.0) + float(q)
-                    bucket = dir_by_movement.setdefault(adir, {})
-                    bucket[amov] = bucket.get(amov, 0.0) + float(q)
-            # queue_per_lane 미전달 시 큐 막대 미표시 (외부 호출자가 env.render() 사용 시
-            # 항상 전달됨; 직접 SumoRenderer 사용 시에만 None 일 수 있음)
 
             for adir, queue in dir_queue.items():
                 adx, ady = _DVEC.get(adir, (0, 0))
                 if adx == 0 and ady == 0:
                     continue
+                if queue <= 0:
+                    continue
 
-                tx_q = cx + adx * IO   # 해당 방향 인디케이터 위치
+                tx_q = cx + adx * IO
                 ty_q = cy + ady * IO
 
-                # 큐 막대: 인디케이터 원 바깥쪽에서 도로 방향으로 뻗음
-                # 정규화 상수 15→10: 10대 정도 큐도 풀 길이로 표시
-                # (실측상 max_queue ~ 18 정도라 적절. 사용자 요청: 작은 큐도 시각화)
+                # 정규화 상수 10: 10대 큐면 풀 길이 (실측 max_queue ~ 18 적정)
                 bar_len = min(queue / 10.0, 1.0) * BLEN
                 qclr    = _queue_color(queue)
 
@@ -513,7 +503,7 @@ class SumoRenderer:
                     y0 = y_edge if ady > 0 else y_edge - bar_len
                     ax.add_patch(mp.Rectangle(
                         (tx_q - BW / 2, y0), BW, max(bar_len, 0.3),
-                        color=qclr, alpha=0.85, zorder=6
+                        color=qclr, alpha=0.9, zorder=6
                     ))
                     lx, ly = tx_q + RI + IO * 0.22, ty_q
                     ha, va = "left", "center"
@@ -522,36 +512,16 @@ class SumoRenderer:
                     x0 = x_edge if adx > 0 else x_edge - bar_len
                     ax.add_patch(mp.Rectangle(
                         (x0, ty_q - BW / 2), max(bar_len, 0.3), BW,
-                        color=qclr, alpha=0.85, zorder=6
+                        color=qclr, alpha=0.9, zorder=6
                     ))
                     lx, ly = tx_q, ty_q + RI + IO * 0.22
                     ha, va = "center", "bottom"
 
-                # 레이블: 이 접근 방향이 현재 green을 받고 있는지 확인
-                # (양방향 동시 green 지원: 예 N+S 가 둘 다 active 일 수 있음)
                 is_active_approach = (adir in green_dirs)
-                q_text_clr = (self.ACTIVE_CLR if is_active_approach
-                              else _queue_color(queue) if queue > 3
-                              else "#888888")
-                # 라벨 형식 — 직진/좌회전 분리:
-                #   단일 movement 인 경우 "N Th: 4"
-                #   여러 movement 혼합 "N Th:4 Lt:1"
-                #   movement 정보 없으면 legacy "N: 4"
-                mov_breakdown = dir_by_movement.get(adir, {})
-                meaningful = {m: q for m, q in mov_breakdown.items()
-                              if q > 0 and m != "?"}
-                if not meaningful:
-                    label_text = f"{adir}: {int(queue)}"
-                elif len(meaningful) == 1:
-                    m, q = next(iter(meaningful.items()))
-                    label_text = f"{adir} {m}: {int(q)}"
-                else:
-                    parts = " ".join(f"{m}:{int(q)}"
-                                     for m, q in sorted(meaningful.items()))
-                    label_text = f"{adir} {parts}"
-
-                ax.text(lx, ly, label_text,
-                        color=q_text_clr,
+                text_clr = (self.ACTIVE_CLR if is_active_approach
+                            else qclr if queue > 3 else "#aaaaaa")
+                ax.text(lx, ly, f"{adir}: {int(queue)}",
+                        color=text_clr,
                         fontsize=10 if is_active_approach else 8,
                         ha=ha, va=va,
                         fontweight="bold" if is_active_approach else "normal",
@@ -597,6 +567,8 @@ class SumoRenderer:
             mp.Patch(color="#2ecc71", label="Queue ≤ 3 veh"),
             mp.Patch(color="#f39c12", label="Queue ≤ 7 veh"),
             mp.Patch(color="#e74c3c", label="Queue ≥ 8 veh"),
+            Line2D([0], [0], color=self.BRT_LANE_CLR, linewidth=3,
+                   label="BRT lane"),
         ]
         ax.legend(
             handles=legend_elems,

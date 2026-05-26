@@ -1,7 +1,8 @@
 # GreenWave — SUMO 교차로 신호제어 강화학습 (MAPPO / CTDE)
 
 RLlib MAPPO(Multi-Agent PPO)로 SUMO 단일·다중 교차로 신호를 제어하는 실습 프레임워크.
-단일 교차로(`tls_ids=["C"]`)에서 시작해 `--tls-ids` + `--sumo-cfg`(또는 `--traffic`) 인자로 임의 SUMO 네트워크(2×2 격자 등)로 확장됩니다.
+`--map` 사전셋으로 시나리오를 선택합니다: `single` / `2x2` / `2x2-brt` / `3x2` / `3x2-brt`.
+각 preset 이 `sumo_cfg` 와 default `tls_ids` 를 자동 해상하며, `--sumo-cfg` / `--tls-ids` 를 명시하면 preset 보다 우선합니다.
 
 **두 가지 학습 모드**:
 - **Simple MAPPO** (기본): Actor/Critic 둘 다 local obs만 사용 (decentralized critic)
@@ -71,6 +72,7 @@ python -c "import ray, pettingzoo, matplotlib; print('RLlib + Renderer OK')"
 GreenWave/
 ├── env_sumo_pz.py             # PettingZoo ParallelEnv — MAPPO 멀티에이전트 환경
 ├── ctde_module.py             # CTDE 커스텀 RLModule (centralized critic, 분리 encoder)
+├── map_presets.py             # --map 사전셋 해상 (sumo_cfg + default tls_ids)
 ├── train_mappo.py             # RLlib MAPPO/CTDE 학습 (--ctde 로 모드 전환)
 ├── evaluate_mappo.py          # 3-way 비교 (Fixed-time / MAPPO / CTDE) → CSV
 ├── record_video_mappo.py      # MAPPO 정책 롤아웃 영상 저장 (short/continuous)
@@ -84,7 +86,10 @@ GreenWave/
 │   ├── single.sumocfg         # 단일교차로 SUMO 설정
 │   ├── 2x2grid.sumocfg        # 2x2grid 기본 (sumo-rl routes, ~0.4대/초)
 │   ├── 2x2grid_dense.sumocfg  # 2x2grid 정체 (~1.4대/초, --traffic high)
-│   └── routes_2x2_dense.rou.xml  # 양방향 + 좌회전 cross flow
+│   ├── routes_2x2_dense.rou.xml  # 양방향 + 좌회전 cross flow
+│   ├── 2x2_brt/               # 2x2 + 좌측 col BRT corridor (3-lane, lane 2 = bus)
+│   ├── 3x2/                   # 2 cols × 3 rows, 모든 edge 2-lane
+│   └── 3x2_brt/               # 3x2 + 좌측 col BRT corridor
 │   # single_intersection.net.xml — 첫 실행 시 netconvert로 자동 생성 (gitignored)
 ├── models/                    # 학습 체크포인트 (gitignored)
 │   ├── MAPPO_sumo_N/                # Simple MAPPO 체크포인트
@@ -107,10 +112,14 @@ GreenWave/
 
 | 네트워크 | green phases | Discrete | action → phase 매핑 |
 |----------|-------------|----------|---------------------|
-| 단일교차로 | `[0, 1, 2, 3]` (모든 phase가 green) | `Discrete(4)` | action 0~3 → phase 0~3 |
-| 2x2grid (sumo-rl) | `[0, 2, 4, 6]` (8 phase 중 4개) | `Discrete(4)` | action 0~3 → phase 0/2/4/6 |
+| 단일교차로 (`single`) | `[0, 1, 2, 3]` (모든 phase가 green) | `Discrete(4)` | action 0~3 → phase 0~3 |
+| 2x2grid (`2x2`, sumo-rl) | `[0, 2, 4, 6]` (8 phase 중 4개) | `Discrete(4)` | action 0~3 → phase 0/2/4/6 |
+| 2x2 BRT (`2x2-brt`) | green 4개 | `Discrete(4)` | BRT TLS: 14-link state, 표준 TLS: 12-link |
+| 3x2 (`3x2`) | green 4개 | `Discrete(4)` | 12-link state, 6 TLS |
+| 3x2 BRT (`3x2-brt`) | green 4개 | `Discrete(4)` | 좌측 col TLS 14-link, 우측 12-link |
 
 phase 전환 시 SUMO connection 의 `dir` 속성 (s/l/r/t) 기반으로 자동 yellow 삽입.
+BRT 시나리오는 NS 직진 phase 에 BRT lane 도 같이 green (별도 BRT phase 없음).
 
 ### Observation Space — SUMO-RL 표준 호환
 
@@ -119,10 +128,16 @@ phase 전환 시 SUMO connection 의 `dir` 속성 (s/l/r/t) 기반으로 자동 
 shape = num_green + 1 + 2 * L
 ```
 
-| 네트워크 | num_green | controlled lanes (L) | shape |
+`L = max(per-agent lanes)` — BRT 시나리오처럼 lane 수가 mixed 인 토폴로지에서는
+작은 agent 의 obs 가 density/queue 부분 0 패딩을 받아 같은 shape 로 정렬됩니다.
+
+| 네트워크 (`--map`) | num_green | L (max lanes) | obs_dim |
 |----------|-----------|----------------------|-------|
-| 단일교차로 | 4 | 4 (또는 8) | (13,) |
-| 2x2grid | 4 | 8 | (21,) |
+| `single` | 4 | 4 (또는 8) | 13 |
+| `2x2` | 4 | 8 | 21 |
+| `2x2-brt` | 4 | 10 (3-lane vertical 포함) | 25 |
+| `3x2` | 4 | 8 | 21 |
+| `3x2-brt` | 4 | 10 | 25 |
 
 - `phase_one_hot`: 현재 green phase 인덱스 one-hot
 - `min_green_flag`: 현재 phase가 min_green 시간 충족했는지 (0/1)
@@ -136,6 +151,10 @@ shape = num_green + 1 + 2 * L
 | `queue` | `−(mean(queues)+max(queues))/10 + throughput×0.5` | 기아 방향 패널티 + 처리량 보너스 |
 | `diff-waiting-time` | `prev_wait − current_wait` (스케일 `/10.0`) | 대기시간 감소 = + 보상 (SUMO-RL 검증) |
 | `pressure` | `out_vehicles − in_vehicles` | 처리량 직접 최대화 |
+
+**공통 switch penalty**: 모든 reward mode 에 `--switch-penalty 0.3` 이 추가 적용됩니다.
+agent 가 phase 를 전환한 step 에서 reward 에서 0.3 을 차감 → yellow_seconds 동안 throughput=0 으로
+인한 학습 노이즈 / phase oscillation 을 억제. 끄려면 `--switch-penalty 0`.
 
 > **(B1) Reward Scaling 변경**: diff-waiting-time 정규화가 `/100` → `/10` 으로 강화됨 (이전 magnitude 가 너무 작아 `loss/value` 가 0 근처에 정체되던 문제 해결).
 
@@ -209,27 +228,35 @@ reward = mean(all agents' local rewards)         ← 모두 동일 (shared)
 
 ```bash
 # 빠른 검증 (10 iter, ~10분, 단일교차로)
-python train_mappo.py --num-iters 10 --reward-mode diff-waiting-time --seed 42
+python train_mappo.py --map single --num-iters 10 --reward-mode diff-waiting-time --seed 42
 
 # 본 학습 — 단일교차로 (150 iter)
-python train_mappo.py --num-iters 150 --num-workers 1 --seed 42
+python train_mappo.py --map single --num-iters 150 --num-workers 1 --seed 42
 
 # 다중 교차로 — 2x2grid 기본 트래픽
-python train_mappo.py --tls-ids 1 2 5 6 \
-  --sumo-cfg sumo_data/2x2grid.sumocfg \
+python train_mappo.py --map 2x2 \
   --reward-mode diff-waiting-time \
   --num-iters 150 --num-workers 4 --seed 42
 
 # 다중 교차로 — 2x2grid 정체 시나리오 (--traffic high)
-python train_mappo.py --tls-ids 1 2 5 6 \
-  --traffic high \
+python train_mappo.py --map 2x2 --traffic high \
   --reward-mode diff-waiting-time \
   --num-iters 150 --num-workers 4 --seed 42
 
+# BRT 시나리오 — 2x2 + 좌측 col BRT corridor (3-lane, lane 2 = bus)
+python train_mappo.py --map 2x2-brt \
+  --reward-mode diff-waiting-time \
+  --num-iters 200 --num-workers 4 --seed 42
+
+# 3x2 (6 TLS, 2 cols × 3 rows)
+python train_mappo.py --map 3x2 --num-iters 200 --num-workers 4 --seed 42
+
+# 3x2 + BRT corridor (6 TLS, 좌측 col 3-lane)
+python train_mappo.py --map 3x2-brt --num-iters 200 --num-workers 4 --seed 42
+
 # CTDE-MAPPO — centralized critic + shared reward (Green Wave 협조 학습)
 # 체크포인트는 models/MAPPO_CTDE_sumo_N/ 에 자동 분리 저장
-python train_mappo.py --ctde --tls-ids 1 2 5 6 \
-  --traffic high \
+python train_mappo.py --ctde --map 2x2 --traffic high \
   --reward-mode diff-waiting-time \
   --num-iters 150 --num-workers 4 --seed 42
 ```
@@ -242,11 +269,13 @@ python train_mappo.py --ctde --tls-ids 1 2 5 6 \
 | `--num-workers` | 1 | Ray env runner 수 (0=driver 직접, 디버깅용) |
 | `--out` | 자동 | 체크포인트 경로 (미지정 시 `models/MAPPO_sumo_N` 자동 버전) |
 | `--checkpoint-freq` | 20 | 중간 체크포인트 주기 (iter 단위) |
-| `--tls-ids` | `["C"]` | SUMO TLS id 목록 (2x2 격자: `1 2 5 6`) |
+| `--map` | `single` | 시나리오 사전셋 (`single` / `2x2` / `2x2-brt` / `3x2` / `3x2-brt`) |
+| `--tls-ids` | preset | SUMO TLS id 목록. 미지정 시 `--map` preset 값 사용 |
+| `--sumo-cfg` | preset | SUMO 설정 파일. 명시 시 `--map`/`--traffic` preset 보다 우선 |
+| `--traffic` | `default` | `default`: 원본 routes / `high`: `2x2 + high` 조합에서 `2x2grid_dense.sumocfg` 자동 사용 |
 | `--seed` | 42 | 전역 랜덤 시드 (random/numpy/torch 일괄) |
 | `--reward-mode` | `queue` | `queue` / `diff-waiting-time` / `pressure` |
-| `--sumo-cfg` | 자동 | SUMO 설정 파일 (미지정 + `--traffic default` 시 단일교차로) |
-| `--traffic` | `default` | `default`: 원본 routes / `high`: 정체 시나리오 (2x2grid_dense.sumocfg 자동 사용) |
+| `--switch-penalty` | 0.3 | phase 전환 시 reward 차감량 (oscillation 억제). 0 으로 끌 수 있음 |
 | `--max-steps` | 3600 | 에피소드 최대 sim 초 |
 | `--delta-time` | 5 | env step당 진행 sim 초 |
 | `--min-green` | 13 | 최소 green 유지 시간 (초). 10→13: oscillation 억제, delta_time=5 기준 3 env step floor |
@@ -281,13 +310,18 @@ python train_mappo.py --ctde --tls-ids 1 2 5 6 \
 ### 2. 평가
 
 ```bash
-# 2-way 쌍대 비교 (FixedTime vs MAPPO) — 기존 동작
+# 2-way 쌍대 비교 (FixedTime vs MAPPO) — 단일교차로
 # 출력: results/eval_metrics_mappo_N.csv  (N = 모델 버전 번호 자동)
-python evaluate_mappo.py --model models/MAPPO_sumo_1 --episodes 5
+python evaluate_mappo.py --model models/MAPPO_sumo_1 --map single --episodes 5
 
-# 학습 시와 동일한 tls-ids / reward-mode / traffic 전달
+# 학습 시와 동일한 --map / --reward-mode / --traffic 전달
 python evaluate_mappo.py --model models/MAPPO_sumo_11 \
-  --tls-ids 1 2 5 6 --traffic high \
+  --map 2x2 --traffic high \
+  --reward-mode diff-waiting-time --episodes 5
+
+# BRT 시나리오 평가
+python evaluate_mappo.py --model models/MAPPO_sumo_20 \
+  --map 2x2-brt \
   --reward-mode diff-waiting-time --episodes 5
 
 # 3-way 비교 (FixedTime vs MAPPO vs CTDE-MAPPO) — Green Wave 검증
@@ -295,7 +329,7 @@ python evaluate_mappo.py --model models/MAPPO_sumo_11 \
 python evaluate_mappo.py \
   --model      models/MAPPO_sumo_11 \
   --model-ctde models/MAPPO_CTDE_sumo_1 \
-  --tls-ids 1 2 5 6 --traffic high \
+  --map 2x2 --traffic high \
   --reward-mode diff-waiting-time --episodes 10
 ```
 
@@ -369,12 +403,15 @@ python evaluate_mappo.py \
 # 기본: continuous 모드 (sim sec 당 1 frame, 자연스러운 흐름)
 # 출력: videos/mappo_policy_rollout_N.mp4
 python record_video_mappo.py --model models/MAPPO_sumo_11 \
-  --tls-ids 1 2 5 6 --traffic high \
+  --map 2x2 --traffic high \
   --reward-mode diff-waiting-time
+
+# BRT 시나리오 영상
+python record_video_mappo.py --model models/MAPPO_sumo_20 --map 2x2-brt
 
 # 짧은 요약 영상 (short 모드 — env step 당 1 frame)
 python record_video_mappo.py --model models/MAPPO_sumo_11 \
-  --mode short --fps 5
+  --map 2x2 --mode short --fps 5
 ```
 
 > **CTDE 체크포인트 영상 녹화**: CTDE obs 가 flat Box (Simple MAPPO 와 같은 단일 ndarray) 로 평탄화되어 있어 호출 형태는 호환되지만, `record_video_mappo.py` 가 현재 env 인스턴스화 시 `ctde_mode=True` 를 전달하지 않아 obs 차원이 달라집니다 (`Box(D,)` vs `Box(D+D×N,)`). CTDE 모델 녹화가 필요하면 env_kwargs 에 `ctde_mode=True` 만 추가하면 됩니다 — 추론 호출 코드는 그대로 사용 가능.
@@ -533,12 +570,12 @@ action = int(torch.argmax(
 - 평가 CSV 의 메타 prefix 컬럼이 학습 메타데이터 (`train_metadata.json`) 를 자동 로드해 출처 추적 가능
 
 ### CTDE 비교 실험 워크플로우
-1. **MAPPO 베이스라인 학습**: `python train_mappo.py --tls-ids 1 2 5 6 --traffic high --num-iters 200`  → `models/MAPPO_sumo_N/`
-2. **CTDE 학습** (같은 hyperparam 으로): `python train_mappo.py --ctde --tls-ids 1 2 5 6 --traffic high --num-iters 200`  → `models/MAPPO_CTDE_sumo_M/`
-3. **3-way 비교 평가**: `python evaluate_mappo.py --model models/MAPPO_sumo_N --model-ctde models/MAPPO_CTDE_sumo_M --tls-ids 1 2 5 6 --traffic high --episodes 10`
+1. **MAPPO 베이스라인 학습**: `python train_mappo.py --map 2x2 --traffic high --num-iters 200`  → `models/MAPPO_sumo_N/`
+2. **CTDE 학습** (같은 hyperparam 으로): `python train_mappo.py --ctde --map 2x2 --traffic high --num-iters 200`  → `models/MAPPO_CTDE_sumo_M/`
+3. **3-way 비교 평가**: `python evaluate_mappo.py --model models/MAPPO_sumo_N --model-ctde models/MAPPO_CTDE_sumo_M --map 2x2 --traffic high --episodes 10`
 4. CSV (`results/eval_metrics_mappo_N.csv`) 의 `avg_stops_per_vehicle`, `avg_co2_per_vehicle`, `speed_cv` 비교 → CTDE 가 Green Wave 효과를 학습했는지 검증
-- **CTDE 는 다중 교차로에서만 의미**: 단일 교차로 (`tls_ids=["C"]`) 에 `--ctde` 를 주면 global obs = local obs 가 되어 효과 없음 (경고 출력)
-- **공정 비교**: 두 모델은 동일한 `--seed`, `--num-iters`, `--reward-mode`, `--traffic` 으로 학습해야 critic 구조 차이만 비교 가능
+- **CTDE 는 다중 교차로에서만 의미**: 단일 교차로 (`--map single`) 에 `--ctde` 를 주면 global obs = local obs 가 되어 효과 없음 (경고 출력)
+- **공정 비교**: 두 모델은 동일한 `--seed`, `--num-iters`, `--reward-mode`, `--map`, `--traffic` 으로 학습해야 critic 구조 차이만 비교 가능
 
 ### 트래픽 시나리오 선택
 - **연구/개발 단계**: `--traffic default` (빠른 학습, 약 5분/iter)

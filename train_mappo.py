@@ -342,13 +342,12 @@ def main():
         .framework("torch")
         # num_env_runners=0: driver process에서 직접 rollout 수행 (디버깅 편의)
         # num_env_runners≥1: 별도 worker process 사용 (안정적 병렬 수집)
-        # sample_timeout_s=600: Ray 기본값 60초로는 dense traffic 시나리오의
-        #   1 episode (~720 step, traci 호출 부하 큰) rollout 시간이 부족
-        #   → worker가 timeout으로 빈 sample 반환 → train_total_steps=0
-        #   증상 회피 위해 600초로 증가 (driver mode num_workers=0 은 무관)
+        # sample_timeout_s=1800: 다중 교차로(2x2-brt, 3x2 등) 1 iter rollout이
+        #   600s를 초과해 빈 sample 반환 → train_total_steps=0/NaN 증상 발생.
+        #   30분으로 상향 (driver mode num_workers=0 은 무관)
         .env_runners(
             num_env_runners=args.num_workers,
-            sample_timeout_s=600.0,
+            sample_timeout_s=1800.0,
         )
         .resources(num_gpus=0)  # M4 Mac: RLlib은 MPS 미지원, CPU 학습
         .callbacks(callbacks_class=_build_callback())  # 진단 지표 RLlib 메트릭 등록
