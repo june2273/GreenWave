@@ -29,8 +29,10 @@ except ImportError:
 
 try:
     from .env_sumo_pz import SumoParallelEnv
+    from .map_presets import MAP_CHOICES, resolve_map_args
 except ImportError:
     from env_sumo_pz import SumoParallelEnv
+    from map_presets import MAP_CHOICES, resolve_map_args
 
 
 def _make_env(config: dict) -> ParallelPettingZooEnv:
@@ -127,6 +129,12 @@ def _build_callback():
                                  "teleported", float(last_info.get("teleported", 0)))
                 self._log_metric(episode, metrics_logger,
                                  "max_queue", float(last_info.get("max_queue", 0)))
+                # 옵션 C: oscillation 진단용 yellow_ratio + insertion-failure 가시화
+                self._log_metric(episode, metrics_logger,
+                                 "yellow_ratio", float(last_info.get("yellow_ratio", 0)))
+                self._log_metric(episode, metrics_logger,
+                                 "vehicles_lost_insert",
+                                 float(last_info.get("vehicles_lost_insert", 0)))
 
                 counts = last_info.get("action_counts", [])
                 total = sum(counts) or 1
@@ -196,17 +204,28 @@ def parse_args():
                    help="중간 체크포인트 저장 주기 (iter 단위)")
     p.add_argument("--max-steps", type=int, default=3600)
     p.add_argument("--delta-time", type=int, default=5)
-    p.add_argument("--min-green", type=int, default=10)
+    p.add_argument("--min-green", type=int, default=13,
+                   help="phase 최소 유지 sec (default 10 → 13: oscillation 억제). "
+                        "delta_time=5 기준 3 env step floor.")
     p.add_argument("--yellow-time", type=int, default=2)
-    # 다중 교차로 확장 시: --tls-ids C D E ...
-    p.add_argument("--tls-ids", nargs="+", default=["C"],
-                   help="SUMO 네트워크 내 TLS id 목록 (단일: C, 2x2: 1 2 5 6)")
+    # 시나리오 선택 — sumo_cfg + default tls_ids 자동 결정
+    p.add_argument("--map", type=str, default="single", choices=MAP_CHOICES,
+                   help="시나리오 사전셋. single=단일교차로, 2x2=sumo-rl 2x2, "
+                        "2x2-brt=좌측 BRT corridor, 3x2=2col x 3row, "
+                        "3x2-brt=3x2+좌측 BRT corridor. "
+                        "--tls-ids / --sumo-cfg 명시 시 그것이 우선.")
+    # --tls-ids 명시 안 하면 --map preset 에서 결정. default None 이 sentinel.
+    p.add_argument("--tls-ids", nargs="+", default=None,
+                   help="SUMO 네트워크 내 TLS id 목록 (미지정 시 --map preset 값 사용)")
     p.add_argument("--seed", type=int, default=42,
                    help="전역 랜덤 시드 (random/numpy/torch/SUMO 일괄 설정)")
     p.add_argument("--reward-mode", type=str, default="queue",
                    choices=["queue", "diff-waiting-time", "pressure"],
                    help="보상 함수 모드 (queue: mean+max 패널티, "
                         "diff-waiting-time: 대기시간 변화량, pressure: 처리량 차이)")
+    p.add_argument("--switch-penalty", type=float, default=0.3,
+                   help="phase switch 마다 reward 에서 빼는 페널티 (oscillation 억제). "
+                        "0 = 비활성, 0.3 = yellow 1sec 분량 queue 손실 추정 (default).")
     p.add_argument("--sumo-cfg", type=str, default=None,
                    help="SUMO 설정 파일 경로 (미지정 시 기본 단일교차로 사용)")
     p.add_argument("--traffic", type=str, default="default",
@@ -238,15 +257,15 @@ def main():
     register_env("sumo_pz", _make_env)
     ray.init(ignore_reinit_error=True)
 
-    # --traffic high + --sumo-cfg 미지정 시 자동으로 dense sumocfg 사용
-    # --sumo-cfg 명시 시 그것이 우선 (사용자가 직접 routes 지정한 경우 존중)
-    sumo_cfg_effective = args.sumo_cfg
-    if args.traffic == "high" and not sumo_cfg_effective:
-        sumo_cfg_effective = str(
-            (Path(__file__).resolve().parent
-             / "sumo_data" / "2x2grid_dense.sumocfg").resolve()
-        )
-        print(f"[traffic=high] sumo_cfg 자동 사용: {sumo_cfg_effective}")
+    # --map 으로부터 sumo_cfg / tls_ids 결정 (사용자 명시값 우선)
+    sumo_cfg_effective, tls_ids_effective = resolve_map_args(
+        map_name=args.map,
+        sumo_cfg_arg=args.sumo_cfg,
+        tls_ids_arg=args.tls_ids,
+        traffic=args.traffic,
+    )
+    args.tls_ids = tls_ids_effective  # train_meta 저장용 동기화
+    print(f"[map={args.map}] sumo_cfg={sumo_cfg_effective} tls_ids={tls_ids_effective}")
 
     env_config = {
         "use_gui": False,
@@ -258,6 +277,7 @@ def main():
         "reward_mode": args.reward_mode,
         "ctde_mode": bool(args.ctde),
         "ctde_shared_reward": (args.ctde_reward == "shared"),
+        "switch_penalty": args.switch_penalty,
     }
     if sumo_cfg_effective:
         env_config["sumo_cfg"] = sumo_cfg_effective
@@ -273,8 +293,12 @@ def main():
     act_space = probe_env.action_space(probe_agent)
     # 후속 TB 로깅에서 action_{i}_ratio 키 가변 생성에 사용
     num_green = probe_env._num_green
+    # CTDE module 이 flat Box obs 에서 local 부분만 slice 하려면 local_dim 필요.
+    # ctde_mode 일 때 obs_space.shape = (local + global concat) 이라 raw _obs_dim 사용.
+    local_dim_for_module = probe_env._obs_dim
     print(f"환경 spec | obs={obs_space.shape} (num_green={num_green}, "
-          f"num_lanes={probe_env._num_lanes}) | act=Discrete({num_green})")
+          f"num_lanes={probe_env._num_lanes}, local_dim={local_dim_for_module}) "
+          f"| act=Discrete({num_green})")
     probe_env.close()
 
     # 하이퍼파라미터 — 한 곳에 모아두고 메타데이터에도 동일하게 기록
@@ -338,8 +362,9 @@ def main():
     )
 
     # ── CTDE: centralized critic 모듈 주입 ───────────────────────────────
-    # Dict obs ({local, global}) 를 처리하는 커스텀 RLModule 로 교체.
-    # PPOCatalog 는 Dict obs 와 분리 인코더를 가정하지 않으므로 우회.
+    # obs 는 flat Box [local(D) | global(D*N)]. module 이 forward 시 slice.
+    # Dict obs 는 RLlib worker process 의 connector pipeline 에서 silent fail
+    # 하므로 사용하지 않음 (total_steps=0 증상). PPOCatalog 도 우회 (분리 encoder).
     if args.ctde:
         from ray.rllib.core.rl_module.multi_rl_module import MultiRLModuleSpec
         from ray.rllib.core.rl_module.rl_module import RLModuleSpec
@@ -351,7 +376,11 @@ def main():
                         module_class=CentralizedCriticPPOModule,
                         observation_space=obs_space,
                         action_space=act_space,
-                        model_config={"hidden_dim": 128},
+                        model_config={
+                            "hidden_dim": 128,
+                            # module 이 flat Box 에서 local 부분 slice 할 때 사용
+                            "local_dim": local_dim_for_module,
+                        },
                     )
                 }
             )
@@ -373,6 +402,7 @@ def main():
     train_meta = {
         "model_name":   run_name,
         "model_path":   out_path,
+        "map":          args.map,
         "tls_ids":      args.tls_ids,
         "reward_mode":  args.reward_mode,
         "seed":         args.seed,
@@ -383,6 +413,7 @@ def main():
         "yellow_time":  args.yellow_time,
         "sumo_cfg":     sumo_cfg_effective,
         "traffic":      args.traffic,
+        "switch_penalty": args.switch_penalty,
         "ctde_mode":    bool(args.ctde),
         "ctde_reward":  args.ctde_reward if args.ctde else None,
         # 학습 중 갱신됨
@@ -438,7 +469,8 @@ def main():
             # old API stack: env_stats["custom_metrics"]["<key>_mean"] 형태
             custom = env_stats.get("custom_metrics", {})
             action_keys = tuple(f"action_{j}_ratio" for j in range(num_green))
-            for k in ("phase_switches", "teleported", "max_queue") + action_keys:
+            for k in ("phase_switches", "teleported", "max_queue",
+                      "yellow_ratio", "vehicles_lost_insert") + action_keys:
                 # 후보 키 순회: 정확한 키 우선, 이후 _mean 변형
                 val = env_stats.get(k, env_stats.get(f"{k}_mean",
                        custom.get(f"{k}_mean", custom.get(k))))

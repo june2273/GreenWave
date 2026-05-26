@@ -1,0 +1,68 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  3x2 BRT TLS programs
+  - TLS 1, 3, 5: 14-char (BRT corridor)
+  - TLS 2, 4, 6: 12-char (표준)
+-->
+<tlLogics>
+    <tlLogic id="1" type="static" programID="0" offset="0">
+        <phase duration="33" state="GGrGrrrGGrGrrr"/>
+        <phase duration="3"  state="yyryrryyyryrrr"/>
+        <phase duration="6"  state="rrGrrrrrrGrrrr"/>
+        <phase duration="3"  state="rryrrrrrryrrrr"/>
+        <phase duration="33" state="rrrrGGrrrrrGGr"/>
+        <phase duration="3"  state="rrrryyrrrrryyr"/>
+        <phase duration="6"  state="rrrrrrGrrrrrrG"/>
+        <phase duration="3"  state="rrrrrryrrrrrry"/>
+    </tlLogic>
+    <tlLogic id="2" type="static" programID="0" offset="0">
+        <phase duration="33" state="GGrrrrGGrrrr"/>
+        <phase duration="3"  state="yyrrrryyrrrr"/>
+        <phase duration="6"  state="rrGrrrrrGrrr"/>
+        <phase duration="3"  state="rryrrrrryrrr"/>
+        <phase duration="33" state="rrrGGrrrrGGr"/>
+        <phase duration="3"  state="rrryyrrrryyr"/>
+        <phase duration="6"  state="rrrrrGrrrrrG"/>
+        <phase duration="3"  state="rrrrryrrrrry"/>
+    </tlLogic>
+    <tlLogic id="3" type="static" programID="0" offset="0">
+        <phase duration="33" state="GGrGrrrGGrGrrr"/>
+        <phase duration="3"  state="yyryrryyyryrrr"/>
+        <phase duration="6"  state="rrGrrrrrrGrrrr"/>
+        <phase duration="3"  state="rryrrrrrryrrrr"/>
+        <phase duration="33" state="rrrrGGrrrrrGGr"/>
+        <phase duration="3"  state="rrrryyrrrrryyr"/>
+        <phase duration="6"  state="rrrrrrGrrrrrrG"/>
+        <phase duration="3"  state="rrrrrryrrrrrry"/>
+    </tlLogic>
+    <tlLogic id="4" type="static" programID="0" offset="0">
+        <phase duration="33" state="GGrrrrGGrrrr"/>
+        <phase duration="3"  state="yyrrrryyrrrr"/>
+        <phase duration="6"  state="rrGrrrrrGrrr"/>
+        <phase duration="3"  state="rryrrrrryrrr"/>
+        <phase duration="33" state="rrrGGrrrrGGr"/>
+        <phase duration="3"  state="rrryyrrrryyr"/>
+        <phase duration="6"  state="rrrrrGrrrrrG"/>
+        <phase duration="3"  state="rrrrryrrrrry"/>
+    </tlLogic>
+    <tlLogic id="5" type="static" programID="0" offset="0">
+        <phase duration="33" state="GGrGrrrGGrGrrr"/>
+        <phase duration="3"  state="yyryrryyyryrrr"/>
+        <phase duration="6"  state="rrGrrrrrrGrrrr"/>
+        <phase duration="3"  state="rryrrrrrryrrrr"/>
+        <phase duration="33" state="rrrrGGrrrrrGGr"/>
+        <phase duration="3"  state="rrrryyrrrrryyr"/>
+        <phase duration="6"  state="rrrrrrGrrrrrrG"/>
+        <phase duration="3"  state="rrrrrryrrrrrry"/>
+    </tlLogic>
+    <tlLogic id="6" type="static" programID="0" offset="0">
+        <phase duration="33" state="GGrrrrGGrrrr"/>
+        <phase duration="3"  state="yyrrrryyrrrr"/>
+        <phase duration="6"  state="rrGrrrrrGrrr"/>
+        <phase duration="3"  state="rryrrrrryrrr"/>
+        <phase duration="33" state="rrrGGrrrrGGr"/>
+        <phase duration="3"  state="rrryyrrrryyr"/>
+        <phase duration="6"  state="rrrrrGrrrrrG"/>
+        <phase duration="3"  state="rrrrryrrrrry"/>
+    </tlLogic>
+</tlLogics>

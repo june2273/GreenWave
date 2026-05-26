@@ -30,8 +30,10 @@ from ray.tune.registry import register_env
 
 try:
     from .env_sumo_pz import SumoParallelEnv
+    from .map_presets import MAP_CHOICES, resolve_map_args
 except ImportError:
     from env_sumo_pz import SumoParallelEnv
+    from map_presets import MAP_CHOICES, resolve_map_args
 
 
 def _make_env(config: dict) -> ParallelPettingZooEnv:
@@ -56,10 +58,13 @@ def parse_args():
                         "yellow phase 포착, ~3600 frame).")
     p.add_argument("--max-steps", type=int, default=1200)
     p.add_argument("--delta-time", type=int, default=5)
-    p.add_argument("--min-green", type=int, default=10)
+    p.add_argument("--min-green", type=int, default=13,
+                   help="학습 시와 동일해야 함 (train_mappo.py 와 default 일치)")
     p.add_argument("--yellow-time", type=int, default=2)
-    p.add_argument("--tls-ids", nargs="+", default=["C"],
-                   help="학습 시 사용한 TLS id 목록 (train_mappo.py와 일치해야 함)")
+    p.add_argument("--map", type=str, default="single", choices=MAP_CHOICES,
+                   help="시나리오 사전셋. 학습 시 사용한 --map 과 일치해야 함.")
+    p.add_argument("--tls-ids", nargs="+", default=None,
+                   help="TLS id 목록 (미지정 시 --map preset 사용)")
     p.add_argument("--reward-mode", type=str, default="queue",
                    choices=["queue", "diff-waiting-time", "pressure"],
                    help="학습 시 사용한 보상 모드 (train_mappo.py와 일치해야 함)")
@@ -80,14 +85,15 @@ def main():
     algo = PPO.from_checkpoint(str(Path(args.model).resolve()))
     module = algo.get_module("shared_policy")
 
-    # --traffic high + --sumo-cfg 미지정 → dense sumocfg 자동
-    sumo_cfg_effective = args.sumo_cfg
-    if args.traffic == "high" and not sumo_cfg_effective:
-        sumo_cfg_effective = str(
-            (Path(__file__).resolve().parent
-             / "sumo_data" / "2x2grid_dense.sumocfg").resolve()
-        )
-        print(f"[traffic=high] sumo_cfg 자동 사용: {sumo_cfg_effective}")
+    # --map 으로부터 sumo_cfg / tls_ids 결정 (사용자 명시값 우선)
+    sumo_cfg_effective, tls_ids_effective = resolve_map_args(
+        map_name=args.map,
+        sumo_cfg_arg=args.sumo_cfg,
+        tls_ids_arg=args.tls_ids,
+        traffic=args.traffic,
+    )
+    args.tls_ids = tls_ids_effective
+    print(f"[map={args.map}] sumo_cfg={sumo_cfg_effective} tls_ids={tls_ids_effective}")
 
     env_kwargs = dict(
         use_gui=False,

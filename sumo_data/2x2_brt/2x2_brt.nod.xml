@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  2x2 BRT 시나리오 nodes
+  Topology: 2 cols x 2 rows = 4 TLS
+  BRT corridor: left vertical (col 1) — TLS 1 ↔ TLS 5
+  좌표는 기존 sumo-rl 2x2 와 동일 (150m edge length, 50 km/h)
+-->
+<nodes>
+    <!-- TLS (4) -->
+    <node id="1" x="300" y="600" type="traffic_light" tl="1"/>
+    <node id="2" x="450" y="600" type="traffic_light" tl="2"/>
+    <node id="5" x="300" y="450" type="traffic_light" tl="5"/>
+    <node id="6" x="450" y="450" type="traffic_light" tl="6"/>
+    <!-- W/E boundary -->
+    <node id="0" x="150" y="600" type="priority"/>
+    <node id="3" x="600" y="600" type="priority"/>
+    <node id="4" x="150" y="450" type="priority"/>
+    <node id="7" x="600" y="450" type="priority"/>
+    <!-- N boundary -->
+    <node id="17" x="300" y="750" type="priority"/>
+    <node id="18" x="450" y="750" type="priority"/>
+    <!-- S boundary -->
+    <node id="9"  x="300" y="300" type="priority"/>
+    <node id="10" x="450" y="300" type="priority"/>
+</nodes>

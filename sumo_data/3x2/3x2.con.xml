@@ -1,0 +1,91 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  3x2 base connections (6 TLS x 12 links = 72 total)
+  Link 순서 (sumo-rl 컨벤션): N-in R/S/L, E-in R/S/L, S-in R/S/L, W-in R/S/L
+  모든 TLS 표준 12-link layout (BRT 없음)
+-->
+<connections>
+    <!-- ═══ TLS 1 (R=1, C=1) ═══ -->
+    <connection from="-v11" to="h11"  fromLane="0" toLane="0" tl="1" linkIndex="0"/>
+    <connection from="-v11" to="-v12" fromLane="0" toLane="0" tl="1" linkIndex="1"/>
+    <connection from="-v11" to="-h12" fromLane="1" toLane="1" tl="1" linkIndex="2"/>
+    <connection from="h12"  to="v11"  fromLane="0" toLane="0" tl="1" linkIndex="3"/>
+    <connection from="h12"  to="h11"  fromLane="0" toLane="0" tl="1" linkIndex="4"/>
+    <connection from="h12"  to="-v12" fromLane="1" toLane="1" tl="1" linkIndex="5"/>
+    <connection from="v12"  to="-h12" fromLane="0" toLane="0" tl="1" linkIndex="6"/>
+    <connection from="v12"  to="v11"  fromLane="0" toLane="0" tl="1" linkIndex="7"/>
+    <connection from="v12"  to="h11"  fromLane="1" toLane="1" tl="1" linkIndex="8"/>
+    <connection from="-h11" to="-v12" fromLane="0" toLane="0" tl="1" linkIndex="9"/>
+    <connection from="-h11" to="-h12" fromLane="0" toLane="0" tl="1" linkIndex="10"/>
+    <connection from="-h11" to="v11"  fromLane="1" toLane="1" tl="1" linkIndex="11"/>
+
+    <!-- ═══ TLS 2 (R=1, C=2) ═══ -->
+    <connection from="-v21" to="h12"  fromLane="0" toLane="0" tl="2" linkIndex="0"/>
+    <connection from="-v21" to="-v22" fromLane="0" toLane="0" tl="2" linkIndex="1"/>
+    <connection from="-v21" to="-h13" fromLane="1" toLane="1" tl="2" linkIndex="2"/>
+    <connection from="h13"  to="v21"  fromLane="0" toLane="0" tl="2" linkIndex="3"/>
+    <connection from="h13"  to="h12"  fromLane="0" toLane="0" tl="2" linkIndex="4"/>
+    <connection from="h13"  to="-v22" fromLane="1" toLane="1" tl="2" linkIndex="5"/>
+    <connection from="v22"  to="-h13" fromLane="0" toLane="0" tl="2" linkIndex="6"/>
+    <connection from="v22"  to="v21"  fromLane="0" toLane="0" tl="2" linkIndex="7"/>
+    <connection from="v22"  to="h12"  fromLane="1" toLane="1" tl="2" linkIndex="8"/>
+    <connection from="-h12" to="-v22" fromLane="0" toLane="0" tl="2" linkIndex="9"/>
+    <connection from="-h12" to="-h13" fromLane="0" toLane="0" tl="2" linkIndex="10"/>
+    <connection from="-h12" to="v21"  fromLane="1" toLane="1" tl="2" linkIndex="11"/>
+
+    <!-- ═══ TLS 3 (R=2, C=1) ═══ -->
+    <connection from="-v12" to="h21"  fromLane="0" toLane="0" tl="3" linkIndex="0"/>
+    <connection from="-v12" to="-v13" fromLane="0" toLane="0" tl="3" linkIndex="1"/>
+    <connection from="-v12" to="-h22" fromLane="1" toLane="1" tl="3" linkIndex="2"/>
+    <connection from="h22"  to="v12"  fromLane="0" toLane="0" tl="3" linkIndex="3"/>
+    <connection from="h22"  to="h21"  fromLane="0" toLane="0" tl="3" linkIndex="4"/>
+    <connection from="h22"  to="-v13" fromLane="1" toLane="1" tl="3" linkIndex="5"/>
+    <connection from="v13"  to="-h22" fromLane="0" toLane="0" tl="3" linkIndex="6"/>
+    <connection from="v13"  to="v12"  fromLane="0" toLane="0" tl="3" linkIndex="7"/>
+    <connection from="v13"  to="h21"  fromLane="1" toLane="1" tl="3" linkIndex="8"/>
+    <connection from="-h21" to="-v13" fromLane="0" toLane="0" tl="3" linkIndex="9"/>
+    <connection from="-h21" to="-h22" fromLane="0" toLane="0" tl="3" linkIndex="10"/>
+    <connection from="-h21" to="v12"  fromLane="1" toLane="1" tl="3" linkIndex="11"/>
+
+    <!-- ═══ TLS 4 (R=2, C=2) ═══ -->
+    <connection from="-v22" to="h22"  fromLane="0" toLane="0" tl="4" linkIndex="0"/>
+    <connection from="-v22" to="-v23" fromLane="0" toLane="0" tl="4" linkIndex="1"/>
+    <connection from="-v22" to="-h23" fromLane="1" toLane="1" tl="4" linkIndex="2"/>
+    <connection from="h23"  to="v22"  fromLane="0" toLane="0" tl="4" linkIndex="3"/>
+    <connection from="h23"  to="h22"  fromLane="0" toLane="0" tl="4" linkIndex="4"/>
+    <connection from="h23"  to="-v23" fromLane="1" toLane="1" tl="4" linkIndex="5"/>
+    <connection from="v23"  to="-h23" fromLane="0" toLane="0" tl="4" linkIndex="6"/>
+    <connection from="v23"  to="v22"  fromLane="0" toLane="0" tl="4" linkIndex="7"/>
+    <connection from="v23"  to="h22"  fromLane="1" toLane="1" tl="4" linkIndex="8"/>
+    <connection from="-h22" to="-v23" fromLane="0" toLane="0" tl="4" linkIndex="9"/>
+    <connection from="-h22" to="-h23" fromLane="0" toLane="0" tl="4" linkIndex="10"/>
+    <connection from="-h22" to="v22"  fromLane="1" toLane="1" tl="4" linkIndex="11"/>
+
+    <!-- ═══ TLS 5 (R=3, C=1) ═══ -->
+    <connection from="-v13" to="h31"  fromLane="0" toLane="0" tl="5" linkIndex="0"/>
+    <connection from="-v13" to="-v14" fromLane="0" toLane="0" tl="5" linkIndex="1"/>
+    <connection from="-v13" to="-h32" fromLane="1" toLane="1" tl="5" linkIndex="2"/>
+    <connection from="h32"  to="v13"  fromLane="0" toLane="0" tl="5" linkIndex="3"/>
+    <connection from="h32"  to="h31"  fromLane="0" toLane="0" tl="5" linkIndex="4"/>
+    <connection from="h32"  to="-v14" fromLane="1" toLane="1" tl="5" linkIndex="5"/>
+    <connection from="v14"  to="-h32" fromLane="0" toLane="0" tl="5" linkIndex="6"/>
+    <connection from="v14"  to="v13"  fromLane="0" toLane="0" tl="5" linkIndex="7"/>
+    <connection from="v14"  to="h31"  fromLane="1" toLane="1" tl="5" linkIndex="8"/>
+    <connection from="-h31" to="-v14" fromLane="0" toLane="0" tl="5" linkIndex="9"/>
+    <connection from="-h31" to="-h32" fromLane="0" toLane="0" tl="5" linkIndex="10"/>
+    <connection from="-h31" to="v13"  fromLane="1" toLane="1" tl="5" linkIndex="11"/>
+
+    <!-- ═══ TLS 6 (R=3, C=2) ═══ -->
+    <connection from="-v23" to="h32"  fromLane="0" toLane="0" tl="6" linkIndex="0"/>
+    <connection from="-v23" to="-v24" fromLane="0" toLane="0" tl="6" linkIndex="1"/>
+    <connection from="-v23" to="-h33" fromLane="1" toLane="1" tl="6" linkIndex="2"/>
+    <connection from="h33"  to="v23"  fromLane="0" toLane="0" tl="6" linkIndex="3"/>
+    <connection from="h33"  to="h32"  fromLane="0" toLane="0" tl="6" linkIndex="4"/>
+    <connection from="h33"  to="-v24" fromLane="1" toLane="1" tl="6" linkIndex="5"/>
+    <connection from="v24"  to="-h33" fromLane="0" toLane="0" tl="6" linkIndex="6"/>
+    <connection from="v24"  to="v23"  fromLane="0" toLane="0" tl="6" linkIndex="7"/>
+    <connection from="v24"  to="h32"  fromLane="1" toLane="1" tl="6" linkIndex="8"/>
+    <connection from="-h32" to="-v24" fromLane="0" toLane="0" tl="6" linkIndex="9"/>
+    <connection from="-h32" to="-h33" fromLane="0" toLane="0" tl="6" linkIndex="10"/>
+    <connection from="-h32" to="v23"  fromLane="1" toLane="1" tl="6" linkIndex="11"/>
+</connections>

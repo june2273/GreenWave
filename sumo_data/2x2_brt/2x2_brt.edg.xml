@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  2x2 BRT edges
+  - 수평 (h*): 모두 2-lane (lane 0: SR, lane 1: L)
+  - 수직 col 1 (v1*): 3-lane (lane 0: SR, lane 1: L, lane 2: BRT 전용)
+  - 수직 col 2 (v2*): 2-lane
+-->
+<edges>
+    <!-- 수평 (모두 2-lane) -->
+    <edge id="-h11" from="0" to="1" numLanes="2" speed="13.89"/>
+    <edge id="-h12" from="1" to="2" numLanes="2" speed="13.89"/>
+    <edge id="-h13" from="2" to="3" numLanes="2" speed="13.89"/>
+    <edge id="-h21" from="4" to="5" numLanes="2" speed="13.89"/>
+    <edge id="-h22" from="5" to="6" numLanes="2" speed="13.89"/>
+    <edge id="-h23" from="6" to="7" numLanes="2" speed="13.89"/>
+    <edge id="h11" from="1" to="0" numLanes="2" speed="13.89"/>
+    <edge id="h12" from="2" to="1" numLanes="2" speed="13.89"/>
+    <edge id="h13" from="3" to="2" numLanes="2" speed="13.89"/>
+    <edge id="h21" from="5" to="4" numLanes="2" speed="13.89"/>
+    <edge id="h22" from="6" to="5" numLanes="2" speed="13.89"/>
+    <edge id="h23" from="7" to="6" numLanes="2" speed="13.89"/>
+
+    <!-- 수직 col 1 — BRT corridor (3-lane, lane 2 = bus only) -->
+    <edge id="-v11" from="17" to="1" numLanes="3" speed="13.89">
+        <lane index="2" allow="bus"/>
+    </edge>
+    <edge id="-v12" from="1" to="5" numLanes="3" speed="13.89">
+        <lane index="2" allow="bus"/>
+    </edge>
+    <edge id="-v13" from="5" to="9" numLanes="3" speed="13.89">
+        <lane index="2" allow="bus"/>
+    </edge>
+    <edge id="v11" from="1" to="17" numLanes="3" speed="13.89">
+        <lane index="2" allow="bus"/>
+    </edge>
+    <edge id="v12" from="5" to="1" numLanes="3" speed="13.89">
+        <lane index="2" allow="bus"/>
+    </edge>
+    <edge id="v13" from="9" to="5" numLanes="3" speed="13.89">
+        <lane index="2" allow="bus"/>
+    </edge>
+
+    <!-- 수직 col 2 — 일반 2-lane -->
+    <edge id="-v21" from="18" to="2" numLanes="2" speed="13.89"/>
+    <edge id="-v22" from="2" to="6" numLanes="2" speed="13.89"/>
+    <edge id="-v23" from="6" to="10" numLanes="2" speed="13.89"/>
+    <edge id="v21" from="2" to="18" numLanes="2" speed="13.89"/>
+    <edge id="v22" from="6" to="2" numLanes="2" speed="13.89"/>
+    <edge id="v23" from="10" to="6" numLanes="2" speed="13.89"/>
+</edges>

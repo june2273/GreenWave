@@ -174,10 +174,12 @@ obs_local ──> [shared encoder] ──> π (actor)
 reward = per-agent local
 
 ─────────────── CTDE-MAPPO (--ctde) ───────────────
-obs = Dict({"local": Box(D), "global": Box(D × N_agents)})
+obs = Box(shape=(D + D × N_agents,))   ← flat 평탄화
+       └──────────┬───────────┘
+        [local | global concat]
 
-obs["local"]  ──> [pi_encoder]  ──> π          ← 실행 시 actor 만 사용
-obs["global"] ──> [vf_encoder]  ──> V (critic) ← 학습 시 critic, 전체 교차로 봄
+obs[:, :D]  ──> [pi_encoder]  ──> π          ← 실행 시 actor 만 slice 해서 사용
+obs[:, D:]  ──> [vf_encoder]  ──> V (critic) ← 학습 시 critic 이 나머지 slice
 reward = mean(all agents' local rewards)         ← 모두 동일 (shared)
 ```
 
@@ -191,10 +193,13 @@ reward = mean(all agents' local rewards)         ← 모두 동일 (shared)
 | 체크포인트 경로 | `models/MAPPO_sumo_N/` | `models/MAPPO_CTDE_sumo_N/` |
 
 **구현**:
-- `ctde_module.py:CentralizedCriticPPOModule` — `DefaultPPOTorchRLModule` 상속, `pi_encoder`/`vf_encoder` 분리. `_forward_train`이 `Columns.EMBEDDINGS`를 emit 하지 않아 PPO learner가 `compute_values(batch, None)` 호출 → critic이 global 재인코딩
-- `env_sumo_pz.py:ctde_mode=True` → obs 가 `Dict({"local","global"})` 로 래핑, global은 `possible_agents` 순서로 stable concat
+- `ctde_module.py:CentralizedCriticPPOModule` — `DefaultPPOTorchRLModule` 상속, `pi_encoder`/`vf_encoder` 분리. `_forward_train`이 `Columns.EMBEDDINGS`를 emit 하지 않아 PPO learner가 `compute_values(batch, None)` 호출 → critic이 global slice 재인코딩
+- `env_sumo_pz.py:ctde_mode=True` → obs 가 **flat `Box(D + D×N,)`** 로 평탄화 (`[local | global concat]`). global concat 은 `possible_agents` 순서로 stable.
+- `train_mappo.py` 가 `RLModuleSpec.model_config["local_dim"]` 로 slice 경계 (`D`) 를 모듈에 전달. 모듈은 `obs[..., :local_dim]` (actor) / `obs[..., local_dim:]` (critic) 로 slice
 - `--ctde-reward shared` (기본): 모든 agent 가 `mean()` 받음. `local`: per-agent reward 유지 (critic만 centralized)
-- **단일 교차로 + `--ctde`**: degenerate (global == local). 경고 출력 후 정상 동작 (backward compat)
+- **단일 교차로 + `--ctde`**: degenerate (global == local 영역 복제). 경고 출력 후 정상 동작 (backward compat)
+
+> **왜 Dict 가 아니라 flat Box 인가**: Dict observation (`{"local", "global"}`) 으로 먼저 구현했더니 `--num-workers ≥ 1` (별도 Ray actor) 에서 RLlib connector pipeline 이 Dict subspace 를 silent drop → `total_steps=0`, NaN reward, weight 업데이트 0회. Driver mode (`--num-workers 0`) 에서는 정상이라 진단 후 flat Box 로 전환. 표준 단일 텐서 라 worker process 호환성 확보, multi-worker 학습 정상 동작 확인.
 
 ---
 
@@ -244,7 +249,7 @@ python train_mappo.py --ctde --tls-ids 1 2 5 6 \
 | `--traffic` | `default` | `default`: 원본 routes / `high`: 정체 시나리오 (2x2grid_dense.sumocfg 자동 사용) |
 | `--max-steps` | 3600 | 에피소드 최대 sim 초 |
 | `--delta-time` | 5 | env step당 진행 sim 초 |
-| `--min-green` | 10 | 최소 green 유지 시간 (초) |
+| `--min-green` | 13 | 최소 green 유지 시간 (초). 10→13: oscillation 억제, delta_time=5 기준 3 env step floor |
 | `--yellow-time` | 2 | green→green 전환 시 yellow 시간 (초) |
 | `--ctde` | off | centralized critic (Green Wave 협조 학습) 활성화. 체크포인트는 `MAPPO_CTDE_sumo_N` |
 | `--ctde-reward` | `shared` | `--ctde` 와 함께: `shared`=mean(all rewards), `local`=per-agent reward 유지 |
@@ -270,8 +275,8 @@ python train_mappo.py --ctde --tls-ids 1 2 5 6 \
 | `lambda_` | `0.95` | (그대로) GAE λ |
 | `clip_param` | `0.2` | (그대로) PPO clip ε |
 | `vf_loss_coeff` | `0.5` | (그대로) |
-| `entropy_coeff` | **`0.005`** | 0.02 → 0.005 (B4: reward 스케일과 균형) |
-| `vf_clip_param` | **`1000.0`** | 500 → 10 → 1000 (A3: VF signal 복원, `loss/value`가 0 근처에 정체되던 문제 해결) |
+| `entropy_coeff` | **`0.03`** | 0.02 → 0.005 (B4) → 0.03 (B5: 좌회전 phase mode collapse 방지. 초기 negative reward에 노출된 action이 확률 0으로 collapse되는 현상을 entropy bonus 6× 강화로 억제) |
+| `vf_clip_param` | **`1000.0`** | 500 → 10 → 1000 (A3: VF signal 복원. 10으로 낮췄더니 `vf_loss_unclipped=175189` 대비 `vf_loss=9.89`로 VF 학습신호 99% 소실 → 1000으로 복원) |
 
 ### 2. 평가
 
@@ -321,6 +326,17 @@ python evaluate_mappo.py \
 | `teleported` | SUMO grid lock 텔레포트 차량 수 (0 이상이면 정체 한계 초과) |
 | `action_{0,1,2,3}_ratio` | 정책 action 선택 비율 (**mode collapse 진단** — 균등이면 0.25씩) |
 
+**Oscillation / Lane Saturation 진단 지표**:
+
+| 컬럼 | 설명 |
+|------|------|
+| `yellow_seconds` | 에피소드 내 yellow phase 로 진행된 총 sim 초 |
+| `yellow_ratio` | `yellow_seconds / total_sim_sec` — 높을수록 불필요한 switching 의심 |
+| `vehicles_loaded` | SUMO에 로드된 누적 차량 수 (route 수요 총량) |
+| `vehicles_departed` | 실제 출발한 누적 차량 수 |
+| `vehicles_lost_insert` | `loaded - departed` — lane 포화로 시뮬레이션에 진입 못 한 차량 수 (silent drop) |
+| `pending_insert_peak` | 에피소드 내 동시 삽입 대기 차량 최대치 |
+
 **Green Wave 직접 측정 지표 (Tier 1)**:
 
 | 컬럼 | 의미 | 좋은 값 |
@@ -361,7 +377,7 @@ python record_video_mappo.py --model models/MAPPO_sumo_11 \
   --mode short --fps 5
 ```
 
-> **CTDE 체크포인트 영상 녹화**: 현재 `record_video_mappo.py` 는 Simple MAPPO (Box obs) 만 지원합니다. CTDE 체크포인트 (`MAPPO_CTDE_sumo_N`) 의 정책 시각화가 필요하면 `evaluate_mappo.py` 결과 CSV 와 TensorBoard 의 `policy/action_dist` 로 정책 행동을 분석하거나, `record_video_mappo.py` 를 CTDE 모드용으로 별도 확장하세요 (`env.ctde_mode=True` + obs Dict tensor 변환).
+> **CTDE 체크포인트 영상 녹화**: CTDE obs 가 flat Box (Simple MAPPO 와 같은 단일 ndarray) 로 평탄화되어 있어 호출 형태는 호환되지만, `record_video_mappo.py` 가 현재 env 인스턴스화 시 `ctde_mode=True` 를 전달하지 않아 obs 차원이 달라집니다 (`Box(D,)` vs `Box(D+D×N,)`). CTDE 모델 녹화가 필요하면 env_kwargs 에 `ctde_mode=True` 만 추가하면 됩니다 — 추론 호출 코드는 그대로 사용 가능.
 
 #### 비디오 인자
 
@@ -405,9 +421,11 @@ tensorboard --logdir results/tb_mappo
 | **loss/{total,policy,value,entropy}** | PPO 학습 손실 |
 | **learner/grad_norm_{global,policy}** | gradient norm (explosion 감지) |
 | **policy/action_dist/action_{0,1,2,3}** | action 선택 비율 (**mode collapse 진단**) |
-| **policy/phase_switches** | 에피소드 누적 phase 전환 |
+| **policy/phase_switches** | 에피소드 누적 phase 전환 (4 agent 2x2 정상 범위: 900~1200) |
 | **policy/max_queue** | 단일 lane 최대 큐 |
-| **policy/teleported** | grid lock 텔레포트 |
+| **policy/teleported** | grid lock 텔레포트 (0 이상이면 정체 한계 초과) |
+| **policy/yellow_ratio** | 전체 sim시간 중 yellow 비율 (oscillation 진단; 값이 높으면 불필요한 switching 의심) |
+| **policy/vehicles_lost_insert** | lane 포화로 시뮬레이션에 진입 못 한 차량 수 (dense traffic 좌회전 lane saturation 진단) |
 | **system/process_rss_mb** | 프로세스 메모리 (누수 감지) |
 | **system/sumo_process_count** | SUMO 프로세스 수 (좀비 감지) |
 | **system/iter_time_sec** | iter 소요 시간 |
@@ -421,19 +439,27 @@ tensorboard --logdir results/tb_mappo
 1. ✅ `reward/mean` 상승 추세 (초기 음수 → 점진 증가)
 2. ✅ `policy/action_dist/action_{0,1,2,3}` 모두 **5% 이상** (한쪽 0% 이면 mode collapse)
 3. ✅ `loss/entropy` 점진 감소 (0 근처 붕괴 X)
-4. ✅ `policy/teleported` 0~소수 (grid lock 없음)
-5. ✅ `system/process_rss_mb` 안정 (지속 증가 X)
-6. ✅ `system/sumo_process_count` 일정 (좀비 없음)
+4. ✅ `loss/value` 지속 감소 (수백 → 수십 범위. 정체하면 `vf_clip_param` 확인)
+5. ✅ `policy/teleported` 0~소수 (grid lock 없음)
+6. ✅ `system/process_rss_mb` 안정 (지속 증가 X)
+7. ✅ `system/sumo_process_count` 일정 (좀비 없음)
 
 **문제 진단**:
 
 | 증상 | 원인 후보 | 대응 |
 |------|----------|------|
-| action 한쪽 0% / 99% | mode collapse | `entropy_coeff` ↑, traffic 다양화 |
+| action 한쪽 0% / 99% | mode collapse (초기 negative reward → collapse) | `entropy_coeff` ↑ (현재 0.03), traffic 다양화 |
+| `loss/value` 수렴 안 하고 정체 | `vf_clip_param` 너무 작음 (학습신호 clip 소실) | `vf_clip_param` ↑ (현재 1000) |
 | `loss/value` 거의 0 | reward magnitude 부족 | `--traffic high`, reward `/10` 정규화 확인 |
-| `phase_switches` > 1000 | SUMO 자동 cycle (구버전 코드?) | D2 패치 적용 확인 |
+| `phase_switches` > 1200 (4 agent 기준) | 비정상적 과도 switching | `--switch-penalty` ↑, `--min-green` ↑ |
+| `policy/yellow_ratio` > 0.15 | phase oscillation (매 step switching) | `--switch-penalty` ↑, `entropy_coeff` ↓ |
 | `teleported` > 0 | 정체 한계 초과 (grid lock) | `--traffic` 낮추기, network 수정 |
+| `vehicles_lost_insert` 급증 | dense traffic에서 lane 포화 (silent drop) | 차량 수요 완화, 좌회전 phase 학습 확인 |
 | `process_rss_mb` 우상향 | 메모리 누수 | env close() 누락 확인 |
+| `train_total_steps=0` (CTDE) | obs space 가 Dict 면 worker connector 가 silent drop | flat Box 평탄화 확인 (`obs_space.shape=(D+D×N,)`). 본 repo는 이미 적용됨 |
+| `train_total_steps=0` (일반) | Ray worker timeout | `sample_timeout_s` 확인 (현재 600s) |
+
+> **참고**: 4 agent 2x2 grid 에서 `phase_switches` 900~1200 은 정상 범위입니다 (agent 당 225~300회, min_green=13/delta_time=5 기준 최소 2.6 step 간격).
 
 ---
 
@@ -476,16 +502,16 @@ from ctde_module import CentralizedCriticPPOModule  # 명시적 import 필요 (F
 algo = PPO.from_checkpoint("models/MAPPO_CTDE_sumo_1")
 module = algo.get_module("shared_policy")
 
-# CTDE 환경은 obs 가 Dict({local, global})
+# CTDE 환경의 obs 는 flat Box(D + D×N,) — Simple MAPPO 와 동일한 단일 ndarray
 obs, _ = env.reset()  # env 는 ctde_mode=True 로 생성
 action = int(torch.argmax(
-    module.forward_inference({"obs": {
-        "local":  torch.tensor(obs["tl_0"]["local"][None],  dtype=torch.float32),
-        "global": torch.tensor(obs["tl_0"]["global"][None], dtype=torch.float32),
-    }})["action_dist_inputs"],
+    module.forward_inference(
+        {"obs": torch.tensor(obs["tl_0"][None], dtype=torch.float32)}
+    )["action_dist_inputs"],
     dim=-1,
 ).item())
-# 실행 시 actor 는 local 만 사용 (decentralized execution); global 은 critic 학습 전용
+# 모듈 내부에서 obs[:, :local_dim] (local) 만 actor 에 사용. 호출자는 평탄화/슬라이싱
+# 신경 쓸 필요 없음. Simple MAPPO 와 동일한 호출 패턴.
 ```
 
 ---
@@ -501,7 +527,6 @@ action = int(torch.argmax(
 ### 병렬 학습
 - `--num-workers 0`: driver process 직접 롤아웃 (디버깅, SUMO 1개)
 - `--num-workers N≥1`: 별도 worker process로 SUMO N개 병렬
-- num_workers 는 **병렬 SUMO 인스턴스 수**이지 교차로 수가 아님 (2x2grid 의 4 교차로 = 1 SUMO 인스턴스의 4 agent)
 
 ### 학습/평가/영상 호출 일관성
 - `--reward-mode`, `--sumo-cfg`/`--traffic`, `--tls-ids` 는 학습·평가·영상에서 **동일하게 지정** 필요

@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  3x2 base routes
+  Demand: 6 horizontal + 4 vertical + 4 cross = total ~1.7 veh/s ≈ 6,120 veh/hr
+-->
+<routes>
+    <vType id="car" vClass="passenger" length="5" minGap="2.5" maxSpeed="13.89"/>
+
+    <!-- ─ 수평 직진 (3 rows x 2 방향, 6 flows) ─ -->
+    <flow id="h1_e" type="car" from="-h11" to="-h13" begin="0" end="100000" probability="0.15" departSpeed="max" departPos="base" departLane="best"/>
+    <flow id="h1_w" type="car" from="h13"  to="h11"  begin="0" end="100000" probability="0.15" departSpeed="max" departPos="base" departLane="best"/>
+    <flow id="h2_e" type="car" from="-h21" to="-h23" begin="0" end="100000" probability="0.15" departSpeed="max" departPos="base" departLane="best"/>
+    <flow id="h2_w" type="car" from="h23"  to="h21"  begin="0" end="100000" probability="0.15" departSpeed="max" departPos="base" departLane="best"/>
+    <flow id="h3_e" type="car" from="-h31" to="-h33" begin="0" end="100000" probability="0.15" departSpeed="max" departPos="base" departLane="best"/>
+    <flow id="h3_w" type="car" from="h33"  to="h31"  begin="0" end="100000" probability="0.15" departSpeed="max" departPos="base" departLane="best"/>
+
+    <!-- ─ 수직 직진 (2 cols x 2 방향, 4 flows) ─ -->
+    <flow id="v1_s" type="car" from="-v11" to="-v14" begin="0" end="100000" probability="0.15" departSpeed="max" departPos="base" departLane="best"/>
+    <flow id="v1_n" type="car" from="v14"  to="v11"  begin="0" end="100000" probability="0.15" departSpeed="max" departPos="base" departLane="best"/>
+    <flow id="v2_s" type="car" from="-v21" to="-v24" begin="0" end="100000" probability="0.15" departSpeed="max" departPos="base" departLane="best"/>
+    <flow id="v2_n" type="car" from="v24"  to="v21"  begin="0" end="100000" probability="0.15" departSpeed="max" departPos="base" departLane="best"/>
+
+    <!-- ─ Cross (좌회전 cross-grid, 4 flows) ─ -->
+    <flow id="cross1" type="car" from="-h11" to="v11"  begin="0" end="100000" probability="0.05" departSpeed="max" departPos="base" departLane="best"/>
+    <flow id="cross2" type="car" from="-h31" to="-v24" begin="0" end="100000" probability="0.05" departSpeed="max" departPos="base" departLane="best"/>
+    <flow id="cross3" type="car" from="-v11" to="-h13" begin="0" end="100000" probability="0.05" departSpeed="max" departPos="base" departLane="best"/>
+    <flow id="cross4" type="car" from="-v21" to="h31"  begin="0" end="100000" probability="0.05" departSpeed="max" departPos="base" departLane="best"/>
+</routes>

@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  3x2 base nodes (2 cols x 3 rows = 6 TLS)
+  좌표: 150m edge length 통일
+  TLS id: 1 (row1col1), 2 (row1col2), 3 (row2col1), 4 (row2col2), 5 (row3col1), 6 (row3col2)
+-->
+<nodes>
+    <!-- TLS (6) -->
+    <node id="1" x="300" y="600" type="traffic_light" tl="1"/>
+    <node id="2" x="450" y="600" type="traffic_light" tl="2"/>
+    <node id="3" x="300" y="450" type="traffic_light" tl="3"/>
+    <node id="4" x="450" y="450" type="traffic_light" tl="4"/>
+    <node id="5" x="300" y="300" type="traffic_light" tl="5"/>
+    <node id="6" x="450" y="300" type="traffic_light" tl="6"/>
+    <!-- N boundary -->
+    <node id="bN1" x="300" y="750" type="priority"/>
+    <node id="bN2" x="450" y="750" type="priority"/>
+    <!-- S boundary -->
+    <node id="bS1" x="300" y="150" type="priority"/>
+    <node id="bS2" x="450" y="150" type="priority"/>
+    <!-- W boundary -->
+    <node id="bW1" x="150" y="600" type="priority"/>
+    <node id="bW2" x="150" y="450" type="priority"/>
+    <node id="bW3" x="150" y="300" type="priority"/>
+    <!-- E boundary -->
+    <node id="bE1" x="600" y="600" type="priority"/>
+    <node id="bE2" x="600" y="450" type="priority"/>
+    <node id="bE3" x="600" y="300" type="priority"/>
+</nodes>

@@ -1,0 +1,65 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  2x2 BRT — TLS programs
+
+  BRT corridor TLS (1, 5): 14-char state
+    pos  0..3  : N-in (R, S, L, BRT-S)
+    pos  4..6  : E-in (R, S, L)
+    pos  7..10 : S-in (R, S, L, BRT-S)
+    pos 11..13 : W-in (R, S, L)
+
+  Standard TLS (2, 6): 12-char state (sumo-rl 원본과 동일)
+
+  Phase 구조: NS_SR → yellow → NS_L → yellow → EW_SR → yellow → EW_L → yellow
+  → Green phase 4개 (action space Discrete(4)) — 학습 코드 그대로 호환
+  → BRT는 NS_SR phase 에 자동 편승 (lane 2도 같이 green)
+-->
+<tlLogics>
+    <!-- TLS 1 — BRT corridor (14-char) -->
+    <tlLogic id="1" type="static" programID="0" offset="0">
+        <phase duration="33" state="GGrGrrrGGrGrrr"/>  <!-- 0: NS SR+BRT -->
+        <phase duration="3"  state="yyryrryyyryrrr"/>  <!-- 1: yellow -->
+        <phase duration="6"  state="rrGrrrrrrGrrrr"/>  <!-- 2: NS L -->
+        <phase duration="3"  state="rryrrrrrryrrrr"/>  <!-- 3: yellow -->
+        <phase duration="33" state="rrrrGGrrrrrGGr"/>  <!-- 4: EW SR -->
+        <phase duration="3"  state="rrrryyrrrrryyr"/>  <!-- 5: yellow -->
+        <phase duration="6"  state="rrrrrrGrrrrrrG"/>  <!-- 6: EW L -->
+        <phase duration="3"  state="rrrrrryrrrrrry"/>  <!-- 7: yellow -->
+    </tlLogic>
+
+    <!-- TLS 5 — BRT corridor (14-char) — TLS 1과 동일한 program -->
+    <tlLogic id="5" type="static" programID="0" offset="0">
+        <phase duration="33" state="GGrGrrrGGrGrrr"/>
+        <phase duration="3"  state="yyryrryyyryrrr"/>
+        <phase duration="6"  state="rrGrrrrrrGrrrr"/>
+        <phase duration="3"  state="rryrrrrrryrrrr"/>
+        <phase duration="33" state="rrrrGGrrrrrGGr"/>
+        <phase duration="3"  state="rrrryyrrrrryyr"/>
+        <phase duration="6"  state="rrrrrrGrrrrrrG"/>
+        <phase duration="3"  state="rrrrrryrrrrrry"/>
+    </tlLogic>
+
+    <!-- TLS 2 — Standard (12-char, sumo-rl 동일) -->
+    <tlLogic id="2" type="static" programID="0" offset="0">
+        <phase duration="33" state="GGrrrrGGrrrr"/>
+        <phase duration="3"  state="yyrrrryyrrrr"/>
+        <phase duration="6"  state="rrGrrrrrGrrr"/>
+        <phase duration="3"  state="rryrrrrryrrr"/>
+        <phase duration="33" state="rrrGGrrrrGGr"/>
+        <phase duration="3"  state="rrryyrrrryyr"/>
+        <phase duration="6"  state="rrrrrGrrrrrG"/>
+        <phase duration="3"  state="rrrrryrrrrry"/>
+    </tlLogic>
+
+    <!-- TLS 6 — Standard (12-char) -->
+    <tlLogic id="6" type="static" programID="0" offset="0">
+        <phase duration="33" state="GGrrrrGGrrrr"/>
+        <phase duration="3"  state="yyrrrryyrrrr"/>
+        <phase duration="6"  state="rrGrrrrrGrrr"/>
+        <phase duration="3"  state="rryrrrrryrrr"/>
+        <phase duration="33" state="rrrGGrrrrGGr"/>
+        <phase duration="3"  state="rrryyrrrryyr"/>
+        <phase duration="6"  state="rrrrrGrrrrrG"/>
+        <phase duration="3"  state="rrrrryrrrrry"/>
+    </tlLogic>
+</tlLogics>

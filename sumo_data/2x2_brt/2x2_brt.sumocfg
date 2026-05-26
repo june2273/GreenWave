@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  2x2 BRT sumocfg
+  Topology: 2 cols x 2 rows, 좌측 vertical = BRT corridor (3-lane)
+  사용: train_mappo / evaluate_mappo 에 (map 2x2-brt) 인자로 지정
+-->
+<configuration xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+               xsi:noNamespaceSchemaLocation="http://sumo.dlr.de/xsd/sumoConfiguration.xsd">
+  <input>
+    <net-file value="2x2_brt.net.xml"/>
+    <route-files value="routes_2x2_brt.rou.xml"/>
+  </input>
+  <time>
+    <begin value="0"/>
+    <end value="3600"/>
+  </time>
+</configuration>

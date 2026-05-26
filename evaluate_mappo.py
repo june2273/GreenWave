@@ -53,8 +53,10 @@ from ray.tune.registry import register_env
 
 try:
     from .env_sumo_pz import SumoParallelEnv
+    from .map_presets import MAP_CHOICES, resolve_map_args
 except ImportError:
     from env_sumo_pz import SumoParallelEnv
+    from map_presets import MAP_CHOICES, resolve_map_args
 
 
 def _make_env(config: dict) -> ParallelPettingZooEnv:
@@ -78,10 +80,13 @@ def parse_args():
                    help="Fixed-time baseline: N 스텝마다 phase 순환")
     p.add_argument("--max-steps", type=int, default=3600)
     p.add_argument("--delta-time", type=int, default=5)
-    p.add_argument("--min-green", type=int, default=10)
+    p.add_argument("--min-green", type=int, default=13,
+                   help="학습 시와 동일해야 함 (train_mappo.py 와 default 일치)")
     p.add_argument("--yellow-time", type=int, default=2)
-    p.add_argument("--tls-ids", nargs="+", default=["C"],
-                   help="학습 시 사용한 TLS id 목록 (train_mappo.py와 일치해야 함)")
+    p.add_argument("--map", type=str, default="single", choices=MAP_CHOICES,
+                   help="시나리오 사전셋. 학습 시 사용한 --map 과 일치해야 함.")
+    p.add_argument("--tls-ids", nargs="+", default=None,
+                   help="TLS id 목록 (미지정 시 --map preset 사용). 학습 시와 일치해야 함.")
     p.add_argument("--reward-mode", type=str, default="queue",
                    choices=["queue", "diff-waiting-time", "pressure"],
                    help="학습 시 사용한 보상 모드 (train_mappo.py와 일치해야 함)")
@@ -129,6 +134,9 @@ def _row_from_info(algorithm: str, ep: int, seed: int, info: dict) -> dict:
         "vehicles_lost_insert":info.get("vehicles_lost_insert",np.nan),
         "pending_insert_peak": info.get("pending_insert_peak", np.nan),
         "pending_insert_final":info.get("pending_insert_final",np.nan),
+        # 옵션 C: yellow_ratio = yellow / total sim sec — oscillation 진단
+        "yellow_seconds":      info.get("yellow_seconds",      np.nan),
+        "yellow_ratio":        info.get("yellow_ratio",        np.nan),
         # Green Wave Tier 1 직접 지표
         "avg_stops_per_vehicle": info.get("avg_stops_per_vehicle", np.nan),
         "avg_co2_per_vehicle":   info.get("avg_co2_per_vehicle",   np.nan),
@@ -182,14 +190,19 @@ def main():
                 "ctde_mode=True 가 없습니다. CTDE 체크포인트가 맞는지 확인하세요."
             )
 
-    # --traffic high + --sumo-cfg 미지정 → dense sumocfg 자동 사용
-    sumo_cfg_effective = args.sumo_cfg
-    if args.traffic == "high" and not sumo_cfg_effective:
-        sumo_cfg_effective = str(
-            (Path(__file__).resolve().parent
-             / "sumo_data" / "2x2grid_dense.sumocfg").resolve()
-        )
-        print(f"[traffic=high] sumo_cfg 자동 사용: {sumo_cfg_effective}")
+    # --map 으로부터 sumo_cfg / tls_ids 결정 (사용자 명시값 우선)
+    sumo_cfg_effective, tls_ids_effective = resolve_map_args(
+        map_name=args.map,
+        sumo_cfg_arg=args.sumo_cfg,
+        tls_ids_arg=args.tls_ids,
+        traffic=args.traffic,
+    )
+    args.tls_ids = tls_ids_effective
+    print(f"[map={args.map}] sumo_cfg={sumo_cfg_effective} tls_ids={tls_ids_effective}")
+
+    # 학습 시 사용한 map 과 eval map 이 다르면 경고
+    if train_meta.get("map") and train_meta["map"] != args.map:
+        print(f"[warning] train map='{train_meta['map']}' vs eval map='{args.map}' 불일치")
 
     env_kwargs = dict(
         use_gui=False,
@@ -224,6 +237,8 @@ def main():
         # Insertion-failure 컬럼 — dense traffic 시 좌회전 lane saturation 가시화
         "vehicles_loaded", "vehicles_departed", "vehicles_lost_insert",
         "pending_insert_peak", "pending_insert_final",
+        # 옵션 C: oscillation 진단
+        "yellow_seconds", "yellow_ratio",
         # Green Wave 지표 — 모든 algorithm 에 공통 기록
         "avg_stops_per_vehicle", "avg_co2_per_vehicle", "avg_speed",
         "speed_cv", "per_direction_wait_ew", "per_direction_wait_ns",
@@ -242,21 +257,20 @@ def main():
         }
 
     def ctde_action(obs_dict, step_idx, agents):
-        """CTDE 모델은 obs 가 Dict({local, global}) — local 만 actor 에 전달.
+        """CTDE 모델 — obs 는 flat Box [local | global concat].
 
-        Decentralized execution: 실제 추론 시 global 은 사용 안 됨.
+        모듈이 forward 시 첫 local_dim 차원만 slice 해 actor 에 사용
+        (decentralized execution). 호출자는 평소처럼 ndarray 만 전달하면 됨.
         """
-        out = {}
-        for agent in agents:
-            local = obs_dict[agent]["local"]
-            global_ = obs_dict[agent]["global"]
-            batch = {"obs": {
-                "local":  torch.tensor(local[None],  dtype=torch.float32),
-                "global": torch.tensor(global_[None], dtype=torch.float32),
-            }}
-            logits = module_ctde.forward_inference(batch)["action_dist_inputs"]
-            out[agent] = int(torch.argmax(logits, dim=-1).item())
-        return out
+        return {
+            agent: int(torch.argmax(
+                module_ctde.forward_inference(
+                    {"obs": torch.tensor(obs_dict[agent][None], dtype=torch.float32)}
+                )["action_dist_inputs"],
+                dim=-1,
+            ).item())
+            for agent in agents
+        }
 
     def fixed_action(obs_dict, step_idx, agents):
         phase = int((step_idx // args.baseline_phase_steps) % 4)
@@ -284,7 +298,9 @@ def main():
                   f"act_dist=[{act_dist_str}] | "
                   f"teleport={r['teleported']:.0f} | "
                   f"lost_insert={r['vehicles_lost_insert']:.0f} "
-                  f"(pending_peak={r['pending_insert_peak']:.0f})")
+                  f"(pending_peak={r['pending_insert_peak']:.0f}) | "
+                  f"yellow={r['yellow_ratio']*100:.1f}% "
+                  f"(switches={r['phase_switches']:.0f})")
 
             # ── CTDE (선택, 동일 seed) ────────────────────────────────────────
             if env_ctde is not None:
@@ -313,7 +329,9 @@ def main():
                   f"speed={r['avg_speed']:.2f} | "
                   f"teleport={r['teleported']:.0f} | "
                   f"lost_insert={r['vehicles_lost_insert']:.0f} "
-                  f"(pending_peak={r['pending_insert_peak']:.0f})")
+                  f"(pending_peak={r['pending_insert_peak']:.0f}) | "
+                  f"yellow={r['yellow_ratio']*100:.1f}% "
+                  f"(switches={r['phase_switches']:.0f})")
     finally:
         # 각 cleanup 독립 실행 — Ray 2.10+ algo.stop()/ray.shutdown() hang 회피
         cleanup_targets = [
@@ -371,6 +389,9 @@ def main():
         "lr":                train_meta.get("lr", ""),
         "entropy_coeff":     train_meta.get("entropy_coeff", ""),
         "vf_clip_param":     train_meta.get("vf_clip_param", ""),
+        "switch_penalty":    train_meta.get("switch_penalty", ""),
+        "min_green":         train_meta.get("min_green", args.min_green),
+        "map":               train_meta.get("map", args.map),
         "train_seed":        train_meta.get("seed", ""),
         "tls_ids":           "_".join(args.tls_ids),
         "num_workers":       train_meta.get("num_workers", ""),
@@ -401,6 +422,8 @@ def main():
                     # Insertion-failure — silent vehicle drop 진단
                     "vehicles_loaded", "vehicles_departed",
                     "vehicles_lost_insert", "pending_insert_peak",
+                    # 옵션 C: oscillation 진단
+                    "yellow_ratio",
                     # Green Wave 핵심 지표 — CTDE 우월성 검증용
                     "avg_stops_per_vehicle", "avg_co2_per_vehicle",
                     "avg_speed", "speed_cv",

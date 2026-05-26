@@ -1,0 +1,90 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  2x2 BRT connections
+  Link 순서 (sumo-rl 컨벤션):
+    N-incoming → outgoing (R, S, L, [BRT-S])
+    E-incoming → outgoing (R, S, L)
+    S-incoming → outgoing (R, S, L, [BRT-S])
+    W-incoming → outgoing (R, S, L)
+
+  BRT corridor TLS (1, 5): NS 방향 진입 edge가 3-lane → 4 links (R/S/L/BRT-S)
+                              → 총 14 links
+  표준 TLS (2, 6): 모든 방향 2-lane → 3 links씩 → 총 12 links
+-->
+<connections>
+    <!-- ═══════ TLS 1 (BRT corridor, 14 links) ═══════ -->
+    <!-- N-in: -v11 (3-lane) -->
+    <connection from="-v11" to="h11"  fromLane="0" toLane="0" tl="1" linkIndex="0"/>
+    <connection from="-v11" to="-v12" fromLane="0" toLane="0" tl="1" linkIndex="1"/>
+    <connection from="-v11" to="-h12" fromLane="1" toLane="1" tl="1" linkIndex="2"/>
+    <connection from="-v11" to="-v12" fromLane="2" toLane="2" tl="1" linkIndex="3"/>
+    <!-- E-in: h12 (2-lane) -->
+    <connection from="h12"  to="v11"  fromLane="0" toLane="0" tl="1" linkIndex="4"/>
+    <connection from="h12"  to="h11"  fromLane="0" toLane="0" tl="1" linkIndex="5"/>
+    <connection from="h12"  to="-v12" fromLane="1" toLane="1" tl="1" linkIndex="6"/>
+    <!-- S-in: v12 (3-lane) -->
+    <connection from="v12"  to="-h12" fromLane="0" toLane="0" tl="1" linkIndex="7"/>
+    <connection from="v12"  to="v11"  fromLane="0" toLane="0" tl="1" linkIndex="8"/>
+    <connection from="v12"  to="h11"  fromLane="1" toLane="1" tl="1" linkIndex="9"/>
+    <connection from="v12"  to="v11"  fromLane="2" toLane="2" tl="1" linkIndex="10"/>
+    <!-- W-in: -h11 (2-lane) -->
+    <connection from="-h11" to="-v12" fromLane="0" toLane="0" tl="1" linkIndex="11"/>
+    <connection from="-h11" to="-h12" fromLane="0" toLane="0" tl="1" linkIndex="12"/>
+    <connection from="-h11" to="v11"  fromLane="1" toLane="1" tl="1" linkIndex="13"/>
+
+    <!-- ═══════ TLS 2 (standard, 12 links) ═══════ -->
+    <!-- N-in: -v21 (2-lane) -->
+    <connection from="-v21" to="h12"  fromLane="0" toLane="0" tl="2" linkIndex="0"/>
+    <connection from="-v21" to="-v22" fromLane="0" toLane="0" tl="2" linkIndex="1"/>
+    <connection from="-v21" to="-h13" fromLane="1" toLane="1" tl="2" linkIndex="2"/>
+    <!-- E-in: h13 (2-lane) -->
+    <connection from="h13"  to="v21"  fromLane="0" toLane="0" tl="2" linkIndex="3"/>
+    <connection from="h13"  to="h12"  fromLane="0" toLane="0" tl="2" linkIndex="4"/>
+    <connection from="h13"  to="-v22" fromLane="1" toLane="1" tl="2" linkIndex="5"/>
+    <!-- S-in: v22 (2-lane) -->
+    <connection from="v22"  to="-h13" fromLane="0" toLane="0" tl="2" linkIndex="6"/>
+    <connection from="v22"  to="v21"  fromLane="0" toLane="0" tl="2" linkIndex="7"/>
+    <connection from="v22"  to="h12"  fromLane="1" toLane="1" tl="2" linkIndex="8"/>
+    <!-- W-in: -h12 (2-lane) -->
+    <connection from="-h12" to="-v22" fromLane="0" toLane="0" tl="2" linkIndex="9"/>
+    <connection from="-h12" to="-h13" fromLane="0" toLane="0" tl="2" linkIndex="10"/>
+    <connection from="-h12" to="v21"  fromLane="1" toLane="1" tl="2" linkIndex="11"/>
+
+    <!-- ═══════ TLS 5 (BRT corridor, 14 links) ═══════ -->
+    <!-- N-in: -v12 (3-lane) -->
+    <connection from="-v12" to="h21"  fromLane="0" toLane="0" tl="5" linkIndex="0"/>
+    <connection from="-v12" to="-v13" fromLane="0" toLane="0" tl="5" linkIndex="1"/>
+    <connection from="-v12" to="-h22" fromLane="1" toLane="1" tl="5" linkIndex="2"/>
+    <connection from="-v12" to="-v13" fromLane="2" toLane="2" tl="5" linkIndex="3"/>
+    <!-- E-in: h22 (2-lane) -->
+    <connection from="h22"  to="v12"  fromLane="0" toLane="0" tl="5" linkIndex="4"/>
+    <connection from="h22"  to="h21"  fromLane="0" toLane="0" tl="5" linkIndex="5"/>
+    <connection from="h22"  to="-v13" fromLane="1" toLane="1" tl="5" linkIndex="6"/>
+    <!-- S-in: v13 (3-lane) -->
+    <connection from="v13"  to="-h22" fromLane="0" toLane="0" tl="5" linkIndex="7"/>
+    <connection from="v13"  to="v12"  fromLane="0" toLane="0" tl="5" linkIndex="8"/>
+    <connection from="v13"  to="h21"  fromLane="1" toLane="1" tl="5" linkIndex="9"/>
+    <connection from="v13"  to="v12"  fromLane="2" toLane="2" tl="5" linkIndex="10"/>
+    <!-- W-in: -h21 (2-lane) -->
+    <connection from="-h21" to="-v13" fromLane="0" toLane="0" tl="5" linkIndex="11"/>
+    <connection from="-h21" to="-h22" fromLane="0" toLane="0" tl="5" linkIndex="12"/>
+    <connection from="-h21" to="v12"  fromLane="1" toLane="1" tl="5" linkIndex="13"/>
+
+    <!-- ═══════ TLS 6 (standard, 12 links) ═══════ -->
+    <!-- N-in: -v22 -->
+    <connection from="-v22" to="h22"  fromLane="0" toLane="0" tl="6" linkIndex="0"/>
+    <connection from="-v22" to="-v23" fromLane="0" toLane="0" tl="6" linkIndex="1"/>
+    <connection from="-v22" to="-h23" fromLane="1" toLane="1" tl="6" linkIndex="2"/>
+    <!-- E-in: h23 -->
+    <connection from="h23"  to="v22"  fromLane="0" toLane="0" tl="6" linkIndex="3"/>
+    <connection from="h23"  to="h22"  fromLane="0" toLane="0" tl="6" linkIndex="4"/>
+    <connection from="h23"  to="-v23" fromLane="1" toLane="1" tl="6" linkIndex="5"/>
+    <!-- S-in: v23 -->
+    <connection from="v23"  to="-h23" fromLane="0" toLane="0" tl="6" linkIndex="6"/>
+    <connection from="v23"  to="v22"  fromLane="0" toLane="0" tl="6" linkIndex="7"/>
+    <connection from="v23"  to="h22"  fromLane="1" toLane="1" tl="6" linkIndex="8"/>
+    <!-- W-in: -h22 -->
+    <connection from="-h22" to="-v23" fromLane="0" toLane="0" tl="6" linkIndex="9"/>
+    <connection from="-h22" to="-h23" fromLane="0" toLane="0" tl="6" linkIndex="10"/>
+    <connection from="-h22" to="v22"  fromLane="1" toLane="1" tl="6" linkIndex="11"/>
+</connections>

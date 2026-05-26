@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  2x2 BRT routes
+  - 일반 차량 (car): 기존 routes_2x2_dense 와 동일 demand (~5,040 veh/hr)
+    8 직진 flows × 0.15 + 4 cross flows × 0.05
+  - BRT 차량 (brt): 좌측 vertical corridor 양방향, 60초/대 (시간당 60대)
+    departLane="2" 로 BRT lane 강제
+-->
+<routes>
+    <vType id="car" vClass="passenger" length="5"  minGap="2.5" maxSpeed="13.89"/>
+    <vType id="brt" vClass="bus"       length="12" minGap="3"   maxSpeed="13.89"/>
+
+    <!-- ─ 일반 차량 직진 (8 flows, 각 probability 0.15) ─ -->
+    <flow id="h1_e" type="car" from="-h11" to="-h13" begin="0" end="100000" probability="0.15" departSpeed="max" departPos="base" departLane="best"/>
+    <flow id="h1_w" type="car" from="h13"  to="h11"  begin="0" end="100000" probability="0.15" departSpeed="max" departPos="base" departLane="best"/>
+    <flow id="h2_e" type="car" from="-h21" to="-h23" begin="0" end="100000" probability="0.15" departSpeed="max" departPos="base" departLane="best"/>
+    <flow id="h2_w" type="car" from="h23"  to="h21"  begin="0" end="100000" probability="0.15" departSpeed="max" departPos="base" departLane="best"/>
+    <flow id="v1_s" type="car" from="-v11" to="-v13" begin="0" end="100000" probability="0.15" departSpeed="max" departPos="base" departLane="best"/>
+    <flow id="v1_n" type="car" from="v13"  to="v11"  begin="0" end="100000" probability="0.15" departSpeed="max" departPos="base" departLane="best"/>
+    <flow id="v2_s" type="car" from="-v21" to="-v23" begin="0" end="100000" probability="0.15" departSpeed="max" departPos="base" departLane="best"/>
+    <flow id="v2_n" type="car" from="v23"  to="v21"  begin="0" end="100000" probability="0.15" departSpeed="max" departPos="base" departLane="best"/>
+
+    <!-- ─ Cross (좌회전) — 4 flows, 각 probability 0.05 ─ -->
+    <flow id="cross1" type="car" from="-h11" to="v11"  begin="0" end="100000" probability="0.05" departSpeed="max" departPos="base" departLane="best"/>
+    <flow id="cross2" type="car" from="-h21" to="-v23" begin="0" end="100000" probability="0.05" departSpeed="max" departPos="base" departLane="best"/>
+    <flow id="cross3" type="car" from="-v11" to="-h13" begin="0" end="100000" probability="0.05" departSpeed="max" departPos="base" departLane="best"/>
+    <flow id="cross4" type="car" from="-v21" to="h11"  begin="0" end="100000" probability="0.05" departSpeed="max" departPos="base" departLane="best"/>
+
+    <!-- ─ BRT — 좌측 vertical corridor 양방향 (60초/대) ─ -->
+    <!-- departLane="2" 로 BRT 전용 lane 강제 사용 -->
+    <flow id="brt_s" type="brt" from="-v11" to="-v13" begin="0" end="100000" period="60" departSpeed="max" departPos="base" departLane="2"/>
+    <flow id="brt_n" type="brt" from="v13"  to="v11"  begin="0" end="100000" period="60" departSpeed="max" departPos="base" departLane="2"/>
+</routes>

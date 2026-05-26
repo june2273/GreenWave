@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  3x2 base edges (모두 2-lane)
+  명명: -hRC = West-to-East row R col-segment C / hRC = East-to-West
+        -vCR = North-to-South col C row-segment R / vCR = South-to-North
+-->
+<edges>
+    <!-- 수평 row 1 -->
+    <edge id="-h11" from="bW1" to="1"   numLanes="2" speed="13.89"/>
+    <edge id="-h12" from="1"   to="2"   numLanes="2" speed="13.89"/>
+    <edge id="-h13" from="2"   to="bE1" numLanes="2" speed="13.89"/>
+    <edge id="h11"  from="1"   to="bW1" numLanes="2" speed="13.89"/>
+    <edge id="h12"  from="2"   to="1"   numLanes="2" speed="13.89"/>
+    <edge id="h13"  from="bE1" to="2"   numLanes="2" speed="13.89"/>
+    <!-- 수평 row 2 -->
+    <edge id="-h21" from="bW2" to="3"   numLanes="2" speed="13.89"/>
+    <edge id="-h22" from="3"   to="4"   numLanes="2" speed="13.89"/>
+    <edge id="-h23" from="4"   to="bE2" numLanes="2" speed="13.89"/>
+    <edge id="h21"  from="3"   to="bW2" numLanes="2" speed="13.89"/>
+    <edge id="h22"  from="4"   to="3"   numLanes="2" speed="13.89"/>
+    <edge id="h23"  from="bE2" to="4"   numLanes="2" speed="13.89"/>
+    <!-- 수평 row 3 -->
+    <edge id="-h31" from="bW3" to="5"   numLanes="2" speed="13.89"/>
+    <edge id="-h32" from="5"   to="6"   numLanes="2" speed="13.89"/>
+    <edge id="-h33" from="6"   to="bE3" numLanes="2" speed="13.89"/>
+    <edge id="h31"  from="5"   to="bW3" numLanes="2" speed="13.89"/>
+    <edge id="h32"  from="6"   to="5"   numLanes="2" speed="13.89"/>
+    <edge id="h33"  from="bE3" to="6"   numLanes="2" speed="13.89"/>
+
+    <!-- 수직 col 1 (4 segments) -->
+    <edge id="-v11" from="bN1" to="1"   numLanes="2" speed="13.89"/>
+    <edge id="-v12" from="1"   to="3"   numLanes="2" speed="13.89"/>
+    <edge id="-v13" from="3"   to="5"   numLanes="2" speed="13.89"/>
+    <edge id="-v14" from="5"   to="bS1" numLanes="2" speed="13.89"/>
+    <edge id="v11"  from="1"   to="bN1" numLanes="2" speed="13.89"/>
+    <edge id="v12"  from="3"   to="1"   numLanes="2" speed="13.89"/>
+    <edge id="v13"  from="5"   to="3"   numLanes="2" speed="13.89"/>
+    <edge id="v14"  from="bS1" to="5"   numLanes="2" speed="13.89"/>
+    <!-- 수직 col 2 (4 segments) -->
+    <edge id="-v21" from="bN2" to="2"   numLanes="2" speed="13.89"/>
+    <edge id="-v22" from="2"   to="4"   numLanes="2" speed="13.89"/>
+    <edge id="-v23" from="4"   to="6"   numLanes="2" speed="13.89"/>
+    <edge id="-v24" from="6"   to="bS2" numLanes="2" speed="13.89"/>
+    <edge id="v21"  from="2"   to="bN2" numLanes="2" speed="13.89"/>
+    <edge id="v22"  from="4"   to="2"   numLanes="2" speed="13.89"/>
+    <edge id="v23"  from="6"   to="4"   numLanes="2" speed="13.89"/>
+    <edge id="v24"  from="bS2" to="6"   numLanes="2" speed="13.89"/>
+</edges>

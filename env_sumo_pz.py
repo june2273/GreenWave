@@ -74,6 +74,7 @@ class SumoParallelEnv(ParallelEnv):
         tls_ids: Optional[List[str]] = None,
         ctde_mode: bool = False,
         ctde_shared_reward: bool = True,
+        switch_penalty: float = 0.3,
     ):
         self.base_dir = Path(__file__).resolve().parent
         self.sumo_data_dir = self.base_dir / "sumo_data"
@@ -101,6 +102,11 @@ class SumoParallelEnv(ParallelEnv):
         self.reward_mode = reward_mode
         self.ctde_mode = bool(ctde_mode)
         self.ctde_shared_reward = bool(ctde_shared_reward)
+        # Phase oscillation 억제용 reward 페널티 (모든 reward_mode 공통 적용)
+        # 매 switch 후 yellow 2초 동안 throughput 0 → 학습 신호 없음에도
+        # 정책이 switch 직후 reward 회복으로 oscillation 학습하던 문제 해결.
+        # 0.3 ≈ yellow 1초당 queue 1대 손실 수준. 과하면 phase 고착화.
+        self.switch_penalty = float(switch_penalty)
 
         # SUMO TLS id → PettingZoo agent id 매핑
         self._tls_ids: List[str] = tls_ids if tls_ids is not None else ["C"]
@@ -127,11 +133,14 @@ class SumoParallelEnv(ParallelEnv):
             for ln in self._per_agent_lanes[agent]
         ))
 
-        # 모든 agent의 obs/act 차원이 동일하다고 가정 (정사각 grid). 첫 agent 기준.
-        # 다른 형태가 필요하면 max+padding 방식으로 확장 가능.
+        # 모든 agent의 obs/act 차원이 동일하다고 가정.
+        # num_lanes 는 agent별로 다를 수 있어 (BRT corridor TLS=10, 일반 TLS=8) max 사용.
+        # 짧은 agent 의 obs 는 density/queue 부분을 0 패딩으로 채워 shape 일관성 유지.
         first = self.possible_agents[0]
         self._num_green: int = len(self._per_agent_green_phases[first])
-        self._num_lanes: int = len(self._per_agent_lanes[first])
+        self._num_lanes: int = max(
+            len(self._per_agent_lanes[a]) for a in self.possible_agents
+        )
         self._obs_dim: int = self._num_green + 1 + 2 * self._num_lanes
 
         # agents: 현재 에피소드 활성 에이전트
@@ -173,6 +182,11 @@ class SumoParallelEnv(ParallelEnv):
         self._episode_departed_total: int = 0
         self._episode_pending_peak: int = 0
         self._episode_pending_final: int = 0
+
+        # 옵션 C: yellow 시간 누적 — oscillation 진단 (yellow_ratio = yellow/total)
+        # 매 switch 마다 yellow_time 초가 추가됨. switch 가 잦을수록 yellow 비율 ↑.
+        # 1 episode 의 (총 시뮬레이션된 sec, yellow 진행된 sec) 모두 추적.
+        self._episode_yellow_seconds: int = 0
 
         # 진단 카운터 (action_counts는 동적 num_green 길이)
         self._episode_phase_switches: int = 0
@@ -237,23 +251,21 @@ class SumoParallelEnv(ParallelEnv):
 
     @functools.lru_cache(maxsize=None)
     def observation_space(self, agent: str) -> spaces.Space:
-        local = spaces.Box(
-            low=0.0,
-            high=1.0,
-            shape=(self._obs_dim,),
-            dtype=np.float32,
-        )
         if not self.ctde_mode:
-            return local
-        # CTDE: actor 는 "local" 만, critic 은 "global"(전체 agent 의 local concat) 사용
+            return spaces.Box(
+                low=0.0, high=1.0,
+                shape=(self._obs_dim,), dtype=np.float32,
+            )
+        # CTDE: 단일 Box 로 평탄화 — [local | global(N agents concat)]
+        # Dict obs 는 RLlib worker process 의 connector pipeline 에서 silent fail
+        # → 항상 Box 로 직렬화하고 RLModule 이 forward 시 slice (CTDE_LOCAL_DIM 사용).
+        # 첫 _obs_dim 차원 = 자기 local. 뒤 _obs_dim × N 차원 = 모든 agent local concat.
         n_agents = len(self.possible_agents)
-        global_space = spaces.Box(
-            low=0.0,
-            high=1.0,
-            shape=(self._obs_dim * n_agents,),
-            dtype=np.float32,
+        total_dim = self._obs_dim + self._obs_dim * n_agents
+        return spaces.Box(
+            low=0.0, high=1.0,
+            shape=(total_dim,), dtype=np.float32,
         )
-        return spaces.Dict({"local": local, "global": global_space})
 
     @functools.lru_cache(maxsize=None)
     def action_space(self, agent: str) -> spaces.Space:
@@ -643,6 +655,13 @@ class SumoParallelEnv(ParallelEnv):
             for ln, q in zip(lanes, raw_queue)
         ], dtype=np.float32)
 
+        # mixed-topology (BRT corridor TLS vs 일반 TLS) 시 agent별 lane 수가 다름.
+        # shape 일관성 위해 max(_num_lanes) 까지 0 패딩.
+        pad = self._num_lanes - len(lanes)
+        if pad > 0:
+            density = np.concatenate([density, np.zeros(pad, dtype=np.float32)])
+            queue   = np.concatenate([queue,   np.zeros(pad, dtype=np.float32)])
+
         obs = np.concatenate([phase_one_hot, [min_green_flag], density, queue])
         self._last_obs[agent] = obs
         return obs
@@ -651,12 +670,16 @@ class SumoParallelEnv(ParallelEnv):
     # PettingZoo Parallel API
     # ------------------------------------------------------------------
 
-    def _wrap_obs(self, local_obs: Dict[str, np.ndarray]) -> Dict[str, object]:
-        """ctde_mode 면 per-agent obs 를 {'local','global'} Dict 로 래핑.
+    def _wrap_obs(self, local_obs: Dict[str, np.ndarray]) -> Dict[str, np.ndarray]:
+        """ctde_mode 면 per-agent obs 를 [local | global_concat] 단일 Box 로 평탄화.
 
-        global concat 순서는 항상 `possible_agents` 기준 — `self.agents` 는
-        에피소드 종료 시 빈 리스트로 mutate 되므로 안정성 보장 안 됨.
-        결측 agent 는 0 벡터로 채워 shape 고정.
+        - global concat 순서는 항상 `possible_agents` 기준 (stable). `self.agents` 는
+          에피소드 종료 시 빈 리스트로 mutate 되므로 사용 금지.
+        - 결측 agent 는 0 벡터로 채워 shape 고정.
+        - Dict obs 대신 평탄화하는 이유: RLlib worker process 의 connector pipeline
+          에서 Dict subspace 처리가 silent failure → total_steps=0. Box 면 안전.
+        - 첫 _obs_dim 차원 = agent 자기 local. 뒤 _obs_dim × N 차원 = 모든 agent
+          local concat. CentralizedCriticPPOModule 이 forward 시 slice.
         """
         if not self.ctde_mode:
             return local_obs
@@ -666,7 +689,7 @@ class SumoParallelEnv(ParallelEnv):
             for a in self.possible_agents
         ]).astype(np.float32)
         return {
-            a: {"local": local_obs[a], "global": global_vec}
+            a: np.concatenate([local_obs[a], global_vec]).astype(np.float32)
             for a in local_obs
         }
 
@@ -696,6 +719,7 @@ class SumoParallelEnv(ParallelEnv):
         self._episode_departed_total = 0
         self._episode_pending_peak = 0
         self._episode_pending_final = 0
+        self._episode_yellow_seconds = 0
 
         # Green Wave 지표 초기화 (Tier 1 + 2)
         self._episode_co2_sum = 0.0
@@ -756,7 +780,9 @@ class SumoParallelEnv(ParallelEnv):
                 yellow_applied = True
 
         if yellow_applied:
-            done, _ = self._simulate_seconds(self.yellow_time)
+            done, yellow_progressed = self._simulate_seconds(self.yellow_time)
+            # 옵션 C: 실제로 yellow phase 로 시뮬레이션된 sec 누적
+            self._episode_yellow_seconds += int(yellow_progressed)
 
         # 5. 목표 green phase 적용
         if not done:
@@ -819,6 +845,10 @@ class SumoParallelEnv(ParallelEnv):
                 throughput_bonus = step_throughput * 0.5
                 reward = -queue_penalty + throughput_bonus
 
+            # 옵션 A: switch 시 추가 페널티 — oscillation 정책 억제
+            if switching[agent] and self.switch_penalty != 0.0:
+                reward -= self.switch_penalty
+
             rewards[agent] = reward
             terminations[agent] = False
             truncations[agent] = done
@@ -868,6 +898,12 @@ class SumoParallelEnv(ParallelEnv):
                 "vehicles_lost_insert":  int(self._episode_loaded_total - self._episode_departed_total),
                 "pending_insert_peak":   int(self._episode_pending_peak),
                 "pending_insert_final":  int(self._episode_pending_final),
+                # 옵션 C: yellow 비율 — phase oscillation 정도 단일 수치 진단
+                # yellow_ratio 가 (yellow_time / delta_time / num_green) 의 균형값
+                # (단일교차로 기본 ≈ 0.07) 보다 크게 높으면 oscillation 의심.
+                "yellow_seconds":        int(self._episode_yellow_seconds),
+                "yellow_ratio":          (float(self._episode_yellow_seconds) / float(self.sim_step)
+                                          if self.sim_step > 0 else 0.0),
                 "action_counts": self._episode_action_counts.tolist(),
                 # 렌더러/디버깅용 — agent별 controlled lane 순서대로의 halting 차량 수
                 "queue_per_lane": list(self._last_queue_per_lane[agent]),

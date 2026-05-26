@@ -13,13 +13,17 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 
 
-def _queue_color(q: float) -> str:
-    """큐 길이 → 색상 (초록 / 주황 / 빨강)"""
-    if q <= 3:
-        return "#2ecc71"
-    elif q <= 7:
-        return "#f39c12"
-    return "#e74c3c"
+# 큐 카테고리별 색 — movement 종류로 즉시 구분 가능 (큐 길이 색은 제거).
+# - "Th" (직진/우회전 통합) → 주황
+# - "Lt" (좌회전) → 초록
+# - "BRT" (버스 전용 차선) → 파랑
+QUEUE_CATEGORY_COLOR = {
+    "Th":  "#f39c12",
+    "Lt":  "#2ecc71",
+    "BRT": "#3498db",
+}
+# 평행 막대 배치 시 일정 순서 유지 (왼쪽→오른쪽 또는 위→아래 일관성)
+QUEUE_CATEGORY_ORDER = ["Th", "Lt", "BRT"]
 
 
 # SUMO connection 의 dir 속성 → 사람이 읽기 쉬운 movement 약어
@@ -45,6 +49,7 @@ class SumoRenderer:
 
     BG_COLOR     = "#0d1117"
     ROAD_COLOR   = "#2c3047"
+    BRT_LANE_CLR = "#3498db"      # BRT 전용 차선 표시 (파란색)
     NODE_COLOR   = "#4a4a6a"
     ACTIVE_CLR   = "#00e676"      # green light
     YELLOW_CLR   = "#ffca28"      # yellow light (P4 신규)
@@ -74,6 +79,9 @@ class SumoRenderer:
         self._phase_info: Dict[str, Dict[int, Dict]] = self._build_phase_directions()
         # lane → 진입 방향 캐시 (큐 막대 렌더링 시 매 frame 재계산 회피)
         self._lane_dir_cache: Dict[Tuple[str, str], str] = {}
+        # BRT 전용 lane id set — net.xml 의 `allow="bus"` 속성으로 식별.
+        # 도로 색 (파란 보조선) + 큐 카테고리 분류에 사용.
+        self._brt_lanes: set = self._extract_brt_lanes()
 
     # ── net 로드 ───────────────────────────────────────────────────────────────
 
@@ -98,6 +106,30 @@ class SumoRenderer:
         except Exception:
             self._net = None
 
+    def _extract_brt_lanes(self) -> set:
+        """net.xml 에서 `allow="bus"` 인 lane id 추출 → BRT 차선 set.
+
+        SUMO 의 vClass 시스템에서 BRT 전용 차선은 `allow="bus"` 로 표기.
+        BRT 가 없는 map (single, 2x2, 3x2) 에서는 빈 set 반환.
+        internal junction lane (id 가 `:` 로 시작) 은 제외.
+        """
+        if self._net is None:
+            return set()
+        net_file = self._get_net_file()
+        if not net_file or not Path(net_file).exists():
+            return set()
+        try:
+            tree = ET.parse(net_file)
+        except Exception:
+            return set()
+        brt = set()
+        for lane in tree.findall(".//lane"):
+            if "bus" in (lane.get("allow") or ""):
+                lid = lane.get("id", "")
+                if lid and not lid.startswith(":"):
+                    brt.add(lid)
+        return brt
+
     # ── 스케일 파라미터 ────────────────────────────────────────────────────────
 
     def _scale(self):
@@ -109,7 +141,9 @@ class SumoRenderer:
         # 큐 막대 최대 길이: 원본 IO×0.90 ≈ sz×0.058 의 ~3배.
         # (이전 5배(sz×0.30)는 queue=3 만 돼도 인접 교차로 segment 절반을 차지해 과장됨)
         BLEN = sz * 0.18
-        BW   = sz * 0.013   # 큐 막대 너비
+        # 큐 막대 너비 — Th/Lt/BRT 평행 배치를 위해 얇게 (3개 막대 + spacing 고려).
+        # 너무 얇으면 시인성 떨어지므로 sz×0.006 (이전 sz×0.013 의 약 절반).
+        BW   = sz * 0.006
         return IO, RA, RI, BLEN, BW, (xmin, ymin, xmax, ymax)
 
     # ── Phase → 활성 방향 매핑 (옵션 B: net.xml 직접 파싱) ─────────────────────
@@ -334,6 +368,8 @@ class SumoRenderer:
         IO, RA, RI, BLEN, BW, (xmin, ymin, xmax, ymax) = self._scale()
 
         # ── 도로 ──────────────────────────────────────────────────────────────
+        # edge 마다 base 도로 선 + (BRT lane 포함 시) 파란 보조선 overlay.
+        # BRT lane.getShape() 는 SUMO 의 정확한 lane geometry 라 평행 표시 가능.
         for edge in self._net.getEdges():
             pts = edge.getShape()
             if len(pts) < 2:
@@ -341,6 +377,17 @@ class SumoRenderer:
             xs, ys = zip(*pts)
             ax.plot(xs, ys, color=self.ROAD_COLOR,
                     linewidth=4, zorder=1, solid_capstyle="round")
+            # 이 edge 의 BRT lane (있다면) 별도 파란 선으로 강조
+            for lane in edge.getLanes():
+                if lane.getID() not in self._brt_lanes:
+                    continue
+                lpts = lane.getShape()
+                if len(lpts) < 2:
+                    continue
+                lxs, lys = zip(*lpts)
+                ax.plot(lxs, lys, color=self.BRT_LANE_CLR,
+                        linewidth=2.0, alpha=0.85,
+                        zorder=1.5, solid_capstyle="round")
 
         # ── 교차로 ────────────────────────────────────────────────────────────
         tls_ids = set(agent_to_tls.values())
@@ -522,11 +569,17 @@ class SumoRenderer:
             mov_str  = mov or "?"
             return f"{ag}: p{ph} [{dirs_str} {mov_str}]"
 
-        green_dirs = "   ".join(
-            _fmt_phase(ag) for ag in sorted(agent_to_tls.keys())
-        )
+        # agent 가 많으면 (3x2 grid → 6 agent) 한 줄 가로 길이가 figure 폭 초과해
+        # 좌우 텍스트가 잘림. 줄당 최대 PER_ROW agent 로 자동 줄바꿈.
+        PER_ROW = 4
+        agents_sorted = sorted(agent_to_tls.keys())
+        title_chunks = [
+            "   ".join(_fmt_phase(ag) for ag in agents_sorted[i:i + PER_ROW])
+            for i in range(0, len(agents_sorted), PER_ROW)
+        ]
+        title_body = "\n".join(title_chunks)
         ax.set_title(
-            f"Step {sim_step} / {max_steps}\n{green_dirs}",
+            f"Step {sim_step} / {max_steps}\n{title_body}",
             color="white", fontsize=11, fontweight="bold", pad=10,
         )
 

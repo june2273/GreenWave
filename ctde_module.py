@@ -5,11 +5,18 @@ Actor sees only its own local observation; Critic sees the concatenated
 global observation (all agents). At execution time the critic is unused,
 so each agent only needs its own local obs.
 
-Expected obs space (per agent, Dict):
-    {
-      "local":  Box(shape=(D,)),
-      "global": Box(shape=(D * N_agents,)),
-    }
+Expected obs space (per agent, **single flat Box**):
+    Box(shape=(D + D*N_agents,))
+    - First D dims = this agent's local obs
+    - Remaining D*N dims = all agents' local obs concatenated (in possible_agents order)
+
+The module slices the Box internally so the actor only sees the first D dims.
+Dict obs (`{"local", "global"}`) was tried first but RLlib worker processes
+(num_env_runners ≥ 1) silently drop Dict subspaces through the connector
+pipeline → total_steps=0. Flat Box is robust across single/multi-worker.
+
+`local_dim` (= D) must be passed via `model_config["local_dim"]` since the
+module cannot infer it from the flat Box shape alone.
 
 Action space: Discrete(num_green).
 """
@@ -38,10 +45,18 @@ class CentralizedCriticPPOModule(DefaultPPOTorchRLModule):
 
     @override(RLModule)
     def setup(self):
-        local_space = self.observation_space["local"]
-        global_space = self.observation_space["global"]
-        local_dim = int(local_space.shape[0])
-        global_dim = int(global_space.shape[0])
+        # Flat Box obs: [local (D) | global (D*N)]. local_dim must come from
+        # model_config since we can't infer D from total dim alone (don't know N).
+        total_dim = int(self.observation_space.shape[0])
+        local_dim = int(self.model_config.get("local_dim", 0))
+        if local_dim <= 0 or local_dim > total_dim:
+            raise ValueError(
+                f"CentralizedCriticPPOModule requires model_config['local_dim'] "
+                f"in (0, {total_dim}]; got {local_dim}. "
+                f"Set it to env._obs_dim when building the RLModuleSpec."
+            )
+        self._local_dim = local_dim
+        global_dim = total_dim - local_dim
         n_actions = int(self.action_space.n)
         h = int(self.model_config.get("hidden_dim", 128))
 
@@ -76,8 +91,9 @@ class CentralizedCriticPPOModule(DefaultPPOTorchRLModule):
 
     @override(RLModule)
     def _forward(self, batch: Dict[str, Any], **kwargs) -> Dict[str, Any]:
-        # Local-only actor — used for inference and exploration.
-        local = batch[Columns.OBS]["local"]
+        # Local-only actor — slice first local_dim cols from flat obs.
+        # Decentralized execution: actor never reads beyond [:, :local_dim].
+        local = batch[Columns.OBS][..., : self._local_dim]
         logits = self.pi(self.pi_encoder(local))
         return {Columns.ACTION_DIST_INPUTS: logits}
 
@@ -86,7 +102,7 @@ class CentralizedCriticPPOModule(DefaultPPOTorchRLModule):
         # Actor still uses only local obs. We deliberately do NOT emit
         # Columns.EMBEDDINGS — this forces the PPO learner to invoke
         # compute_values(batch, embeddings=None), where our override
-        # re-encodes from the global observation.
+        # re-encodes from the global slice.
         return self._forward(batch, **kwargs)
 
     @override(DefaultPPOTorchRLModule)
@@ -95,8 +111,8 @@ class CentralizedCriticPPOModule(DefaultPPOTorchRLModule):
         batch: Dict[str, Any],
         embeddings: Optional[Any] = None,
     ) -> TensorType:
-        # Critic always uses the global observation (centralized critic).
-        global_obs = batch[Columns.OBS]["global"]
+        # Critic uses the global slice (all agents' local obs concat).
+        global_obs = batch[Columns.OBS][..., self._local_dim :]
         return self.vf(self.vf_encoder(global_obs)).squeeze(-1)
 
     @override(InferenceOnlyAPI)
