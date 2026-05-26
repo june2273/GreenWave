@@ -212,8 +212,8 @@ def parse_args():
     p.add_argument("--max-steps", type=int, default=3600)
     p.add_argument("--delta-time", type=int, default=5)
     p.add_argument("--min-green", type=int, default=13,
-                   help="phase 최소 유지 sec (default 10 → 13: oscillation 억제). "
-                        "delta_time=5 기준 3 env step floor.")
+                   help="phase 최소 유지 sec. delta_time=5 기준 3 env step floor. "
+                        "oscillation 억제를 위해 13 권장.")
     p.add_argument("--yellow-time", type=int, default=2)
     # 시나리오 선택 — sumo_cfg + default tls_ids 자동 결정
     p.add_argument("--map", type=str, default="single", choices=MAP_CHOICES,

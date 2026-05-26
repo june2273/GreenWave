@@ -67,7 +67,7 @@ class SumoParallelEnv(ParallelEnv):
         use_gui: bool = False,
         delta_time: int = 5,
         yellow_time: int = 2,
-        min_green: int = 10,
+        min_green: int = 13,
         max_steps: int = 3600,
         reward_mode: str = "diff-waiting-time",
         tls_ids: Optional[List[str]] = None,
