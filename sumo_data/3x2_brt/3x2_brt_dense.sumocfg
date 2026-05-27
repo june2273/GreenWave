@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  3x2 BRT dense sumocfg : 세종시 현실 시뮬레이션 최종 버전
+  행복청 제23차 행복도시 교통량 조사 (2025.04) AM peak 실측 기반
+  6교차로(TLS 1~6) 방향별 실측 교통량 적용
+  사용: python train_mappo.py (map 3x2-brt, traffic high, ctde)
+-->
+<configuration xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+               xsi:noNamespaceSchemaLocation="http://sumo.dlr.de/xsd/sumoConfiguration.xsd">
+  <input>
+    <net-file value="3x2_brt.net.xml"/>
+    <route-files value="routes_3x2_brt_dense.rou.xml"/>
+  </input>
+  <time>
+    <begin value="0"/>
+    <end value="3600"/>
+  </time>
+</configuration>

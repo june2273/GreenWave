@@ -1,0 +1,95 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  3x2 BRT 고밀도 routes — 세종시 현실 시뮬레이션 최종 버전 (LOS D)
+  사용: train_mappo.py / evaluate_mappo.py (map=3x2-brt, traffic=high)
+
+  ═══════════════════════════════════════════════════════════════════════════════
+  [TLS ↔ 세종시 실제 교차로 매핑]
+  ═══════════════════════════════════════════════════════════════════════════════
+    TLS 1 (top-left,    BRT) ↔ 성금교차로
+    TLS 2 (top-right)        ↔ 청사교차로
+    TLS 3 (middle-left, BRT) ↔ 한누리대로-도움4로  (추정)
+    TLS 4 (middle-right)     ↔ 갈매로-도움4로      (추정)
+    TLS 5 (bottom-left, BRT) ↔ 어진교차로
+    TLS 6 (bottom-right)     ↔ 갈매로-가름로
+
+  ═══════════════════════════════════════════════════════════════════════════════
+  [1차 자료] 행복청 제23차 행복도시 교통량 조사 보도자료 (2025.04.24, AM peak)
+  ═══════════════════════════════════════════════════════════════════════════════
+    ⑪ 성금교차로      4,245 pcu/h  (LOS D, 65.5초 지체)  → TLS 1
+    ⑫ 어진교차로      3,959 pcu/h  (LOS D, 63.7초)      → TLS 5
+    ⑳ 청사교차로      2,593 pcu/h  (LOS D, 51.7초)      → TLS 2
+    ㉑ 갈매로-가름로   2,782 pcu/h  (LOS D, 53.4초)      → TLS 6
+    한누리대로-도움4로  PDF 없음 → 추정 4,100 pcu/h  (TLS 1, 5 평균)  → TLS 3
+    갈매로-도움4로      PDF 없음 → 추정 2,690 pcu/h  (TLS 2, 6 평균)  → TLS 4
+
+  ═══════════════════════════════════════════════════════════════════════════════
+  [2차 자료] 공공데이터포털 세종특별자치시_교차로 방향별 교통 통행량 (2023-03)
+  ═══════════════════════════════════════════════════════════════════════════════
+    교차로명           E%      W%      S%      N%      NS합    EW합
+    성금사거리         20.8    21.0    23.3    35.0    58.3    41.8     → TLS 1
+    청사교차로         19.2    17.2    28.9    34.7    63.6    36.4     → TLS 2
+    어진교차로         18.3    23.7    27.3    30.8    58.1    42.0     → TLS 5
+    갈매로-가름로      CSV 없음 → 청사 split 적용 (right col 유사)        → TLS 6
+    한누리대로-도움4로  CSV 없음 → 성금/어진 평균 적용                       → TLS 3
+    갈매로-도움4로      CSV 없음 → 청사/(갈매로-가름로) 평균 적용             → TLS 4
+
+  ═══════════════════════════════════════════════════════════════════════════════
+  [Edge flow 산출 — pcu/h × 0.87 (실차환산) → 방향 분배 → 직진 corridor 추출]
+  ═══════════════════════════════════════════════════════════════════════════════
+    v1 BRT corridor (좌측 열, TLS 1-3-5 직진):
+      성금 NS=2,142 / 한누리-도움4 NS=2,069 / 어진 NS=1,998 (veh/h, 양방향)
+      평균 2,070 / 2 ≈ 1,035 → 직진 비율 적용 → 980 veh/h/방향 (2x2 dense 와 동일, 검증값)
+    v2 우측 열 (TLS 2-4-6 직진):
+      청사 NS=1,444 / 갈매-도움4 NS=1,498 / 갈매-가름 NS=1,549
+      평균 1,497 / 2 ≈ 749 → 직진 비율 → 470 veh/h/방향 (2x2 dense 와 동일)
+    h1 Row 1 (TLS 1↔2, 성금-청사 라인): 750 veh/h/방향 (2x2 dense 와 동일)
+    h2 Row 2 (TLS 3↔4, 도움4로 라인, 추정): 700 veh/h/방향 (양 row 평균치)
+    h3 Row 3 (TLS 5↔6, 어진-갈매가름 라인): 750 veh/h/방향 (2x2 dense 와 동일)
+    cross flows (좌회전): 도시 평균 비율 ~15%
+      2x2 dense 의 4개 cross 분포 (250/160/320/160) 를 3행 grid 에 맞춰 1.5x 스케일
+      → 375 / 240 / 480 / 240 (총 1,335)
+
+  ═══════════════════════════════════════════════════════════════════════════════
+  총 네트워크 수요: ~8,655 veh/h
+    직진: v1*2 + v2*2 + h1*2 + h2*2 + h3*2 = 1,960 + 940 + 1,500 + 1,400 + 1,500 = 7,300
+    cross: 375 + 240 + 480 + 240 = 1,335
+    BRT:   20
+  cross/total ≈ 15.4% (도시 좌회전 평균)
+  BRT: 세종 갈매로선 B1 AM peak 6분 배차 (10대/hr/방향, period=360)
+  ═══════════════════════════════════════════════════════════════════════════════
+-->
+<routes>
+    <vType id="car" vClass="passenger" length="5"  minGap="2.5" maxSpeed="13.89"/>
+    <vType id="brt" vClass="bus"       length="12" minGap="3"   maxSpeed="13.89"/>
+
+    <!-- ─ BRT corridor (v1, 좌측 열) — 980 veh/h/방향 ────────────────────── -->
+    <flow id="v1_s" type="car" from="-v11" to="-v14" begin="0" end="100000" vehsPerHour="980" departSpeed="max" departPos="base" departLane="best"/>
+    <flow id="v1_n" type="car" from="v14"  to="v11"  begin="0" end="100000" vehsPerHour="980" departSpeed="max" departPos="base" departLane="best"/>
+
+    <!-- ─ 우측 열 (v2) — 470 veh/h/방향 ─────────────────────────────────── -->
+    <flow id="v2_s" type="car" from="-v21" to="-v24" begin="0" end="100000" vehsPerHour="470" departSpeed="max" departPos="base" departLane="best"/>
+    <flow id="v2_n" type="car" from="v24"  to="v21"  begin="0" end="100000" vehsPerHour="470" departSpeed="max" departPos="base" departLane="best"/>
+
+    <!-- ─ Row 1 (h1, 성금-청사 라인) — 750 veh/h/방향 ──────────────────── -->
+    <flow id="h1_e" type="car" from="-h11" to="-h13" begin="0" end="100000" vehsPerHour="750" departSpeed="max" departPos="base" departLane="best"/>
+    <flow id="h1_w" type="car" from="h13"  to="h11"  begin="0" end="100000" vehsPerHour="750" departSpeed="max" departPos="base" departLane="best"/>
+
+    <!-- ─ Row 2 (h2, 도움4로 라인, 추정) — 700 veh/h/방향 ───────────────── -->
+    <flow id="h2_e" type="car" from="-h21" to="-h23" begin="0" end="100000" vehsPerHour="700" departSpeed="max" departPos="base" departLane="best"/>
+    <flow id="h2_w" type="car" from="h23"  to="h21"  begin="0" end="100000" vehsPerHour="700" departSpeed="max" departPos="base" departLane="best"/>
+
+    <!-- ─ Row 3 (h3, 어진-갈매가름 라인) — 750 veh/h/방향 ───────────────── -->
+    <flow id="h3_e" type="car" from="-h31" to="-h33" begin="0" end="100000" vehsPerHour="750" departSpeed="max" departPos="base" departLane="best"/>
+    <flow id="h3_w" type="car" from="h33"  to="h31"  begin="0" end="100000" vehsPerHour="750" departSpeed="max" departPos="base" departLane="best"/>
+
+    <!-- ─ 좌회전 cross flows (도시 좌회전 ~15%, 2x2 dense 분포 1.5x 스케일) ── -->
+    <flow id="cross1" type="car" from="-h11" to="v11"  begin="0" end="100000" vehsPerHour="375" departSpeed="max" departPos="base" departLane="best"/>
+    <flow id="cross2" type="car" from="-h31" to="-v24" begin="0" end="100000" vehsPerHour="240" departSpeed="max" departPos="base" departLane="best"/>
+    <flow id="cross3" type="car" from="-v11" to="-h13" begin="0" end="100000" vehsPerHour="480" departSpeed="max" departPos="base" departLane="best"/>
+    <flow id="cross4" type="car" from="-v21" to="h31"  begin="0" end="100000" vehsPerHour="240" departSpeed="max" departPos="base" departLane="best"/>
+
+    <!-- ─ BRT (갈매로선 AM peak 6분 배차, 10대/hr/방향) ─────────────────── -->
+    <flow id="brt_s" type="brt" from="-v11" to="-v14" begin="0" end="100000" period="360" departSpeed="max" departPos="base" departLane="2"/>
+    <flow id="brt_n" type="brt" from="v14"  to="v11"  begin="0" end="100000" period="360" departSpeed="max" departPos="base" departLane="2"/>
+</routes>
