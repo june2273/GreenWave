@@ -88,12 +88,18 @@ def parse_args():
                    help="저장 경로 (미지정 시 --model 또는 --model-ctde 버전 번호로 자동 생성, "
                         "예: results/eval_metrics_mappo_4.csv)")
     p.add_argument("--baseline-phase-steps", type=int, default=3,
-                   help="Fixed-time baseline: N 스텝마다 phase 순환")
+                   help="Fixed-time baseline: N 스텝마다 phase 순환 (--baseline=symmetric 전용)")
+    p.add_argument("--baseline", type=str, default="symmetric",
+                   choices=["symmetric", "sejong"],
+                   help="Fixed-time 베이스라인 타입. "
+                        "symmetric: N-step 균등 사이클 (기본, 4×15s). "
+                        "sejong: 세종시 실제 신호 타이밍 (비대칭, --map 3x2-brt --traffic high 전용). "
+                        "sejong 사용 시 --sejong-phase-seconds 로 phase별 실측 초 지정.")
     p.add_argument("--max-steps", type=int, default=3600)
     p.add_argument("--delta-time", type=int, default=5)
     p.add_argument("--min-green", type=int, default=13,
                    help="학습 시와 동일해야 함 (train_mappo.py 와 default 일치)")
-    p.add_argument("--yellow-time", type=int, default=2)
+    p.add_argument("--yellow-time", type=int, default=3)
     p.add_argument("--map", type=str, default="single", choices=MAP_CHOICES,
                    help="시나리오 사전셋. 학습 시 사용한 --map 과 일치해야 함.")
     p.add_argument("--reward-mode", type=str, default="diff-waiting-time",
@@ -109,6 +115,15 @@ def parse_args():
                    help="env 에 전달할 BRT 가중치. "
                         "미지정 시 model 의 train_metadata.json 에서 자동 로드 (없으면 1.0). "
                         "명시 시 metadata 보다 우선. baseline 비교 시 1.0 명시 권장.")
+    p.add_argument("--sejong-phase-seconds", type=int, nargs=4,
+                   default=None,
+                   metavar=("NS_SR", "NS_L", "EW_SR", "EW_L"),
+                   help="--baseline=sejong 전용: 세종시 실제 신호 4개 phase 지속 시간 (초). "
+                        "예: --sejong-phase-seconds 47 20 47 28 (어진교차로 실측). "
+                        "명시 시 모든 agent 에 동일 적용. "
+                        "미지정 시 SEJONG_PER_TLS_PHASE_SECONDS dict (3x2-brt 6 TLS 별 실측: "
+                        "세담터2026 가름로 + 공공2023 성금/청사/어진 + 도움4로 corridor 추정) 사용. "
+                        "모든 phase 값은 min_green(≥13s) 이상이어야 함.")
     p.add_argument("--sample", action="store_true",
                    help="argmax 대신 Categorical sampling 으로 행동 선택 "
                         "(train 과 동일, 확률 mass 그대로 반영). "
@@ -327,6 +342,70 @@ def main():
         phase = int((step_idx // args.baseline_phase_steps) % 4)
         return {agent: phase for agent in agents}
 
+    # ─ 세종시 실측 신호 타이밍 — 3x2-brt agent별 실측 데이터 ─────────────
+    # 출처:
+    #   세담터 (세종특별자치시_신호등.csv, 2026.04, 1순위)
+    #   공공데이터포털 (세종특별자치시_교차로 신호 표준데이터, 2023, 2순위)
+    #   미확인 교차로 (도움4로): 같은 corridor 내 실측 교차로의 신호 사용 (추정, 평균 X)
+    #
+    # 4-phase 매핑 [NS_SR, NS_L, EW_SR, EW_L] (단위: 초):
+    #   tl_0 (TLS 1, 성금)          공공2023 45+45+25+45 → [45, 25, 45, 25]
+    #   tl_1 (TLS 2, 청사)          공공2023 46+20+31+23+20 → [46, 20, 31, 23]
+    #   tl_2 (TLS 3, 한누리-도움4)  공공/세담터 없음 → 성금(같은 corridor) 채택 → [45, 25, 45, 25]
+    #   tl_3 (TLS 4, 갈매-도움4)    공공/세담터 없음 → 청사(같은 corridor) 채택 → [46, 20, 31, 23]
+    #   tl_4 (TLS 5, 어진)          공공2023 18+20+47+47+28 → [47, 20, 47, 28]
+    #   tl_5 (TLS 6, 갈매-가름로)   세담터2026 45/35 + 황색3 → [45, 20, 35, 20]
+    SEJONG_PER_TLS_PHASE_SECONDS = {
+        "tl_0": [45, 25, 45, 25],  # 성금 (한누리/BRT)
+        "tl_1": [46, 20, 31, 23],  # 청사 (갈매)
+        "tl_2": [45, 25, 45, 25],  # 도움4로(한누리), 성금 추정
+        "tl_3": [46, 20, 31, 23],  # 도움4로(갈매), 청사 추정
+        "tl_4": [47, 20, 47, 28],  # 어진 (한누리/BRT)
+        "tl_5": [45, 20, 35, 20],  # 가름로 (갈매, 세담터2026)
+    }
+
+    def _phase_from_secs(phase_secs, step_idx, dt):
+        """주어진 phase_secs (NS_SR, NS_L, EW_SR, EW_L) 와 step_idx → phase 인덱스.
+
+        초 → step 환산 (내림, 최소 1 step), cycle 모듈로 후 boundary 검색.
+        """
+        phase_steps = [max(1, s // dt) for s in phase_secs]
+        cycle_len = sum(phase_steps)
+        boundaries = []
+        acc = 0
+        for s in phase_steps:
+            boundaries.append(acc)
+            acc += s
+        cycle_pos = step_idx % cycle_len
+        phase = 0
+        for i in range(len(boundaries) - 1, -1, -1):
+            if cycle_pos >= boundaries[i]:
+                phase = i
+                break
+        return phase
+
+    def fixed_action_sejong(obs_dict, step_idx, agents):
+        """세종시 실제 신호 타이밍 기반 Fixed-Time 베이스라인 (per-agent 비대칭).
+
+        --sejong-phase-seconds 명시 시: 모든 agent에 동일 [NS_SR, NS_L, EW_SR, EW_L] 적용.
+        미명시 시: SEJONG_PER_TLS_PHASE_SECONDS dict의 agent별 실측 신호 적용 (3x2-brt 6 TLS).
+        모든 phase는 min_green(13s) 이상임이 확인됨.
+        """
+        dt = args.delta_time
+        if args.sejong_phase_seconds is not None:
+            # 사용자 명시 단일 set — 모든 agent에 동일 적용
+            phase = _phase_from_secs(args.sejong_phase_seconds, step_idx, dt)
+            return {agent: phase for agent in agents}
+        # per-agent 실측 적용 (3x2-brt 전용)
+        result = {}
+        for agent in agents:
+            secs = SEJONG_PER_TLS_PHASE_SECONDS.get(agent, [33, 20, 33, 20])
+            result[agent] = _phase_from_secs(secs, step_idx, dt)
+        return result
+
+    baseline_fn = fixed_action_sejong if args.baseline == "sejong" else fixed_action
+    baseline_label = "FixedTime(Sejong)" if args.baseline == "sejong" else "FixedTime"
+
     try:
         # ── 쌍대 비교: 동일 ep에서 동일 seed 사용 ────────────────────────────
         # 같은 seed → SUMO가 동일한 차량 수요를 생성하므로
@@ -375,10 +454,10 @@ def main():
                       f"(pending_peak={r['pending_insert_peak']:.0f})")
 
             # ── FixedTime (동일 seed) ─────────────────────────────────────────
-            info = run_episode(env_fix, fixed_action, seed=seed)
-            rows.append(_row_from_info("FixedTime", ep, seed, info))
+            info = run_episode(env_fix, baseline_fn, seed=seed)
+            rows.append(_row_from_info(baseline_label, ep, seed, info))
             r = rows[-1]
-            print(f"[FixedTime] ep={ep} seed={seed} | "
+            print(f"[{baseline_label}] ep={ep} seed={seed} | "
                   f"wait={r['avg_waiting_time']:.1f}s | "
                   f"queue={r['total_queue_length']:.0f} | "
                   f"stops/veh={r['avg_stops_per_vehicle']:.2f} | "
@@ -412,7 +491,7 @@ def main():
         algo_names.append("MAPPO")
     if module_ctde is not None:
         algo_names.append("CTDE")
-    algo_names.append("FixedTime")
+    algo_names.append(baseline_label)
     summary_rows = []
     for algo_name in algo_names:
         sub = df_raw[df_raw["algorithm"] == algo_name]

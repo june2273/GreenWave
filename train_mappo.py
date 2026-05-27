@@ -214,7 +214,7 @@ def parse_args():
     p.add_argument("--min-green", type=int, default=13,
                    help="phase 최소 유지 sec. delta_time=5 기준 3 env step floor. "
                         "oscillation 억제를 위해 13 권장.")
-    p.add_argument("--yellow-time", type=int, default=2)
+    p.add_argument("--yellow-time", type=int, default=3)
     # 시나리오 선택 — sumo_cfg + default tls_ids 자동 결정
     p.add_argument("--map", type=str, default="single", choices=MAP_CHOICES,
                    help="시나리오 사전셋. single=단일교차로, 2x2=sumo-rl 2x2, "
@@ -227,9 +227,9 @@ def parse_args():
                    choices=["diff-waiting-time"],
                    help="보상 함수 모드 (diff-waiting-time: 이전 step 누적대기시간 - 현재) / 10. "
                         "현재 단일 모드만 지원 (queue/pressure 는 cleanup 으로 제거됨).")
-    p.add_argument("--switch-penalty", type=float, default=0.3,
+    p.add_argument("--switch-penalty", type=float, default=0.45,
                    help="phase switch 마다 reward 에서 빼는 페널티 (oscillation 억제). "
-                        "0 = 비활성, 0.3 = yellow 1sec 분량 queue 손실 추정 (default).")
+                        "0 = 비활성, 0.45 = yellow 3sec × 1대/sec 손실 추정 (yellow_time=3 기본값에 맞춤).")
     p.add_argument("--brt-weight", type=float, default=1.0,
                    help="BRT(vClass=bus) 차량 waiting time 가중치. "
                         "1.0 = 가중치 비활성 (baseline, 기존 동작과 bit-identical). "

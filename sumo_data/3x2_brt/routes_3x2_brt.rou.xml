@@ -1,8 +1,9 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
-  3x2 BRT routes
-  - 일반 차량: 3x2 base 와 동일 demand (~6,120 veh/hr)
-  - BRT: 좌측 corridor 양방향 (60초/대) — bN1↔bS1 전 구간 통과
+  3x2 BRT routes (default, ~6,120 veh/h)
+  - 일반 차량: 3x2 base 와 동일 demand (probability 기반)
+  - BRT: 좌측 corridor 양방향, 6분 배차 (10대/h/방향, 세종 BRT 표준)
+  세종시 실측 고밀도 버전 → routes_3x2_brt_dense.rou.xml (--traffic high)
 -->
 <routes>
     <vType id="car" vClass="passenger" length="5"  minGap="2.5" maxSpeed="13.89"/>
@@ -28,7 +29,7 @@
     <flow id="cross3" type="car" from="-v11" to="-h13" begin="0" end="100000" probability="0.05" departSpeed="max" departPos="base" departLane="best"/>
     <flow id="cross4" type="car" from="-v21" to="h31"  begin="0" end="100000" probability="0.05" departSpeed="max" departPos="base" departLane="best"/>
 
-    <!-- ─ BRT — 좌측 corridor 전 구간 (60초/대 양방향) ─ -->
-    <flow id="brt_s" type="brt" from="-v11" to="-v14" begin="0" end="100000" period="60" departSpeed="max" departPos="base" departLane="2"/>
-    <flow id="brt_n" type="brt" from="v14"  to="v11"  begin="0" end="100000" period="60" departSpeed="max" departPos="base" departLane="2"/>
+    <!-- ─ BRT — 좌측 corridor 전 구간 (6분/대 양방향, 세종 BRT 표준 배차) ─ -->
+    <flow id="brt_s" type="brt" from="-v11" to="-v14" begin="0" end="100000" period="600" departSpeed="max" departPos="base" departLane="2"/>
+    <flow id="brt_n" type="brt" from="v14"  to="v11"  begin="0" end="100000" period="600" departSpeed="max" departPos="base" departLane="2"/>
 </routes>

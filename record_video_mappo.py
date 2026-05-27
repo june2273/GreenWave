@@ -72,7 +72,7 @@ def parse_args():
     p.add_argument("--delta-time", type=int, default=5)
     p.add_argument("--min-green", type=int, default=13,
                    help="학습 시와 동일해야 함 (train_mappo.py 와 default 일치)")
-    p.add_argument("--yellow-time", type=int, default=2)
+    p.add_argument("--yellow-time", type=int, default=3)
     p.add_argument("--map", type=str, default="single", choices=MAP_CHOICES,
                    help="시나리오 사전셋. 학습 시 사용한 --map 과 일치해야 함.")
     p.add_argument("--reward-mode", type=str, default="diff-waiting-time",

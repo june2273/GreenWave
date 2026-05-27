@@ -1,20 +1,24 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
-  2x2 BRT default routes — 세종시 실측 분포 0.59x 스케일 (~3,600 veh/h)
+  2x2 BRT default routes — 세종시 실측 분포 0.59x 스케일 + 현실적 좌회전 비율 보정
   사용: map=2x2-brt (traffic 인자 없거나 default)
 
   설계:
-    * 분포 패턴은 세종시 실측 (BRT corridor v1 > 일반 도로 v2) 유지
-    * 강도만 0.59x 로 낮춰 빠른 학습 iteration & 좌회전 phase 학습 보장
+    * 직진 패턴은 세종시 실측 × 0.59 보존 (v1 > v2)
+    * cross flows 는 도시 평균 좌회전 비율 (~13%) 로 보정
+      — 이전 4.9% 는 argmax inference 시 좌회전 phase prob 가 직진 prob 보다
+        낮아져 영구 미선택 (mode collapse 유사) → 좌회전 학습이 비디오/평가에
+        반영 안 됨. cross 합 170→500 으로 증액해 좌회전 prob > 직진 prob 유도.
     * 고밀도(traffic=high) 모드는 routes_2x2_brt_dense.rou.xml 참조
 
-  Edge flow (세종 실측 × 0.59):
-    v1 (BRT corridor): 980×0.59 ≈ 580 veh/h/방향
-    v2 (right col):    470×0.59 ≈ 280 veh/h/방향
-    h1, h2 (rows):     750×0.59 ≈ 440 veh/h/방향
-    cross flows:       원본 비율 보존 (30~60 veh/h)
+  Edge flow:
+    v1 (BRT corridor): 580 veh/h/방향 (세종 980 × 0.59)
+    v2 (right col):    280 veh/h/방향 (세종 470 × 0.59)
+    h1, h2 (rows):     440 veh/h/방향 (세종 750 × 0.59)
+    cross flows:       150/90/175/85 (직진 합의 ~14%, 도시 좌회전 평균)
 
-  총 네트워크 수요: ~3,650 veh/h (≈ LOS B-C 수준)
+  총 네트워크 수요: ~4,000 veh/h (직진 3,480 + cross 500 + BRT 12)
+  cross/total ≈ 12.5% (이전 4.9% → 도시 좌회전 비율 수준)
   BRT: 평시 10분 배차 (6대/hr/방향)
 -->
 <routes>
@@ -37,11 +41,11 @@
     <flow id="h2_e" type="car" from="-h21" to="-h23" begin="0" end="100000" vehsPerHour="440" departSpeed="max" departPos="base" departLane="best"/>
     <flow id="h2_w" type="car" from="h23"  to="h21"  begin="0" end="100000" vehsPerHour="440" departSpeed="max" departPos="base" departLane="best"/>
 
-    <!-- ─ 좌회전 cross flows (Sejong 분포 × 0.59) ───────────────────────── -->
-    <flow id="cross1" type="car" from="-h11" to="v11"  begin="0" end="100000" vehsPerHour="50" departSpeed="max" departPos="base" departLane="best"/>
-    <flow id="cross2" type="car" from="-h21" to="-v23" begin="0" end="100000" vehsPerHour="30" departSpeed="max" departPos="base" departLane="best"/>
-    <flow id="cross3" type="car" from="-v11" to="-h13" begin="0" end="100000" vehsPerHour="60" departSpeed="max" departPos="base" departLane="best"/>
-    <flow id="cross4" type="car" from="-v21" to="h11"  begin="0" end="100000" vehsPerHour="30" departSpeed="max" departPos="base" departLane="best"/>
+    <!-- ─ 좌회전 cross flows (도시 좌회전 비율 ~14% 반영, 원본 분포 5:3:6:3 보존) ─ -->
+    <flow id="cross1" type="car" from="-h11" to="v11"  begin="0" end="100000" vehsPerHour="150" departSpeed="max" departPos="base" departLane="best"/>
+    <flow id="cross2" type="car" from="-h21" to="-v23" begin="0" end="100000" vehsPerHour="90"  departSpeed="max" departPos="base" departLane="best"/>
+    <flow id="cross3" type="car" from="-v11" to="-h13" begin="0" end="100000" vehsPerHour="175" departSpeed="max" departPos="base" departLane="best"/>
+    <flow id="cross4" type="car" from="-v21" to="h11"  begin="0" end="100000" vehsPerHour="85"  departSpeed="max" departPos="base" departLane="best"/>
 
     <!-- ─ BRT (평시 10분 배차, 6대/hr/방향) ─────────────────────────────── -->
     <flow id="brt_s" type="brt" from="-v11" to="-v13" begin="0" end="100000" period="600" departSpeed="max" departPos="base" departLane="2"/>

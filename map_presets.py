@@ -3,8 +3,15 @@ Map preset 정의 + 인자 해상 (train_mappo / evaluate_mappo / record_video_m
 
 --map 옵션이 (sumo_cfg, default tls_ids) 를 결정.
 --sumo-cfg / --tls-ids 가 명시되면 그것이 우선.
---map=2x2 + --traffic=high  → 2x2grid_dense.sumocfg (sumo-rl dense, legacy 호환)
---map=2x2-brt + --traffic=high → 2x2_brt_dense.sumocfg (세종시 실측 ~6,130 veh/h)
+
+시나리오 역할 이분화:
+  2x2 / 2x2-brt  → 모델 개발·빠른 실험용
+  3x2-brt        → 세종시 현실 시뮬레이션 최종 버전 (--traffic high 필수)
+
+--traffic high 분기:
+  2x2      → 2x2grid_dense.sumocfg  (sumo-rl dense, legacy 호환)
+  2x2-brt  → 2x2_brt_dense.sumocfg  (행복청 실측 ~6,810 veh/h, 2x2 기준)
+  3x2-brt  → 3x2_brt_dense.sumocfg  (행복청 실측 6교차로 기반, 세종 최종)
 """
 from pathlib import Path
 from typing import List, Optional
@@ -46,13 +53,15 @@ def resolve_map_args(
     # tls_ids: 사용자 명시 우선
     tls_ids = list(tls_ids_arg) if tls_ids_arg else list(preset["tls_ids"])
 
-    # sumo_cfg: 사용자 명시 > 2x2+traffic=high 특수처리 > preset
+    # sumo_cfg: 사용자 명시 > traffic=high 특수처리 > preset
     if sumo_cfg_arg:
         sumo_cfg = sumo_cfg_arg
     elif map_name == "2x2" and traffic == "high":
         sumo_cfg = "sumo_data/2x2/2x2grid_dense.sumocfg"
     elif map_name == "2x2-brt" and traffic == "high":
         sumo_cfg = "sumo_data/2x2_brt/2x2_brt_dense.sumocfg"
+    elif map_name == "3x2-brt" and traffic == "high":
+        sumo_cfg = "sumo_data/3x2_brt/3x2_brt_dense.sumocfg"
     else:
         sumo_cfg = preset["sumo_cfg"]
 

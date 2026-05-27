@@ -66,14 +66,14 @@ class SumoParallelEnv(ParallelEnv):
         sumo_cfg: Optional[str] = None,
         use_gui: bool = False,
         delta_time: int = 5,
-        yellow_time: int = 2,
+        yellow_time: int = 3,
         min_green: int = 13,
         max_steps: int = 3600,
         reward_mode: str = "diff-waiting-time",
         tls_ids: Optional[List[str]] = None,
         ctde_mode: bool = False,
         ctde_shared_reward: bool = True,
-        switch_penalty: float = 0.3,
+        switch_penalty: float = 0.45,
         brt_weight: float = 1.0,
     ):
         self.base_dir = Path(__file__).resolve().parent
@@ -103,9 +103,10 @@ class SumoParallelEnv(ParallelEnv):
         self.ctde_mode = bool(ctde_mode)
         self.ctde_shared_reward = bool(ctde_shared_reward)
         # Phase oscillation 억제용 reward 페널티 (모든 reward_mode 공통 적용)
-        # 매 switch 후 yellow 2초 동안 throughput 0 → 학습 신호 없음에도
+        # 매 switch 후 yellow_time 초 동안 throughput 0 → 학습 신호 없음에도
         # 정책이 switch 직후 reward 회복으로 oscillation 학습하던 문제 해결.
-        # 0.3 ≈ yellow 1초당 queue 1대 손실 수준. 과하면 phase 고착화.
+        # default 0.45 ≈ yellow 3초 × 1대/초 손실 (세종시 신호 3초 yellow 기준).
+        # 이전 yellow_time=2 모델 재사용 시 외부에서 0.3 명시. 과하면 phase 고착화.
         self.switch_penalty = float(switch_penalty)
 
         # BRT(vClass=bus) 차량 waiting time 가중치.
