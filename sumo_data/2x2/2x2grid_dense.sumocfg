@@ -8,8 +8,8 @@
 <configuration xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
                xsi:noNamespaceSchemaLocation="http://sumo.dlr.de/xsd/sumoConfiguration.xsd">
   <input>
-    <net-file value="/Users/june2_07/PycharmProjects/sumo-rl-1.4.5/sumo_rl/nets/2x2grid/2x2.net.xml"/>
-    <route-files value="/Users/june2_07/PycharmProjects/GreenWave/sumo_data/routes_2x2_dense.rou.xml"/>
+    <net-file value="2x2.net.xml"/>
+    <route-files value="routes_2x2_dense.rou.xml"/>
   </input>
   <time>
     <begin value="0"/>
