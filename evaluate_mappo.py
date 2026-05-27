@@ -47,9 +47,7 @@ import numpy as np
 import pandas as pd
 import ray
 import torch
-from ray.rllib.algorithms.ppo import PPO
-from ray.rllib.env.wrappers.pettingzoo_env import ParallelPettingZooEnv
-from ray.tune.registry import register_env
+from ray.rllib.core.rl_module.rl_module import RLModule
 
 try:
     from .env_sumo_pz import SumoParallelEnv
@@ -59,22 +57,35 @@ except ImportError:
     from map_presets import MAP_CHOICES, resolve_map_args
 
 
-def _make_env(config: dict) -> ParallelPettingZooEnv:
-    return ParallelPettingZooEnv(SumoParallelEnv(**config))
+def _load_rl_module(model_path: str) -> RLModule:
+    """체크포인트에서 shared_policy RLModule 가중치만 로드 (env runner 없이).
+
+    PPO.from_checkpoint()는 학습 당시 num_env_runners 설정을 복원하며
+    SUMO 환경을 다시 스핀업하려다 실패(IndexError: list index out of range)함.
+    RLModule.from_checkpoint()는 가중치 파일만 읽으므로 SUMO/Ray worker 불필요.
+    """
+    module_path = Path(model_path) / "learner_group" / "learner" / "rl_module" / "shared_policy"
+    if not module_path.exists():
+        raise FileNotFoundError(
+            f"RLModule 체크포인트를 찾을 수 없습니다: {module_path}\n"
+            f"모델 경로가 올바른지 확인하세요: {model_path}"
+        )
+    return RLModule.from_checkpoint(str(module_path))
 
 
 def parse_args():
     p = argparse.ArgumentParser(description="Evaluate MAPPO vs Fixed-time baseline")
-    p.add_argument("--model", type=str, required=True,
+    p.add_argument("--model", type=str, default=None,
                    help="MAPPO 체크포인트 디렉터리 (예: models/MAPPO_sumo_1). "
-                        "단순 MAPPO (decentralized critic) 가 학습된 모델.")
+                        "단순 MAPPO (decentralized critic) 가 학습된 모델. "
+                        "미지정 시 --model-ctde 단독 평가 (CTDE vs FixedTime 2-way).")
     p.add_argument("--model-ctde", type=str, default=None,
                    help="(선택) CTDE-MAPPO 체크포인트 디렉터리 (예: models/MAPPO_CTDE_sumo_1). "
-                        "지정 시 3-way 비교 (FixedTime vs MAPPO vs CTDE) 수행.")
+                        "--model 과 함께 지정 시 3-way 비교 (FixedTime vs MAPPO vs CTDE) 수행.")
     p.add_argument("--episodes", type=int, default=5)
     p.add_argument("--seed", type=int, default=100)
     p.add_argument("--csv-out", type=str, default=None,
-                   help="저장 경로 (미지정 시 --model 버전 번호로 자동 생성, "
+                   help="저장 경로 (미지정 시 --model 또는 --model-ctde 버전 번호로 자동 생성, "
                         "예: results/eval_metrics_mappo_4.csv)")
     p.add_argument("--baseline-phase-steps", type=int, default=3,
                    help="Fixed-time baseline: N 스텝마다 phase 순환")
@@ -98,7 +109,16 @@ def parse_args():
                    help="env 에 전달할 BRT 가중치. "
                         "미지정 시 model 의 train_metadata.json 에서 자동 로드 (없으면 1.0). "
                         "명시 시 metadata 보다 우선. baseline 비교 시 1.0 명시 권장.")
-    return p.parse_args()
+    p.add_argument("--sample", action="store_true",
+                   help="argmax 대신 Categorical sampling 으로 행동 선택 "
+                        "(train 과 동일, 확률 mass 그대로 반영). "
+                        "기본 argmax 는 mode collapse 시 비주류 action 을 절대 선택 안 함 — "
+                        "--sample 로 정책의 진짜 분포를 반영한 평가 가능. "
+                        "재현성 위해 episode 별 seed 가 torch 시드로도 사용됨.")
+    args = p.parse_args()
+    if args.model is None and args.model_ctde is None:
+        p.error("--model 또는 --model-ctde 중 하나 이상을 지정해야 합니다.")
+    return args
 
 
 def _action_ratios(action_counts: list) -> dict:
@@ -176,23 +196,25 @@ def run_episode(env: SumoParallelEnv, action_fn, seed: int) -> dict:
 def main():
     args = parse_args()
 
-    register_env("sumo_pz", _make_env)
+    # CTDE 체크포인트 역직렬화에 CentralizedCriticPPOModule 이 필요 — 항상 선임포트
+    try:
+        from ctde_module import CentralizedCriticPPOModule  # noqa: F401
+    except ImportError:
+        pass
+
     ray.init(ignore_reinit_error=True)
-    algo = PPO.from_checkpoint(str(Path(args.model).resolve()))
-    module = algo.get_module("shared_policy")
 
-    # 모델 학습 메타데이터 (없으면 빈 dict) — CSV 모든 행에 prefix로 부착
-    train_meta = _load_train_metadata(args.model)
+    module = None
+    train_meta: dict = {}
+    if args.model is not None:
+        module = _load_rl_module(str(Path(args.model).resolve()))
+        # 모델 학습 메타데이터 (없으면 빈 dict) — CSV 모든 행에 prefix로 부착
+        train_meta = _load_train_metadata(args.model)
 
-    # CTDE 모델은 ctde_module.CentralizedCriticPPOModule 의 import 가능성을 위해
-    # 명시적으로 import (PPO.from_checkpoint 가 module_class 를 FQN 으로 resolve 함)
-    algo_ctde = None
     module_ctde = None
     train_meta_ctde: dict = {}
     if args.model_ctde:
-        from ctde_module import CentralizedCriticPPOModule  # noqa: F401
-        algo_ctde = PPO.from_checkpoint(str(Path(args.model_ctde).resolve()))
-        module_ctde = algo_ctde.get_module("shared_policy")
+        module_ctde = _load_rl_module(str(Path(args.model_ctde).resolve()))
         train_meta_ctde = _load_train_metadata(args.model_ctde)
         if not train_meta_ctde.get("ctde_mode"):
             print(
@@ -239,7 +261,7 @@ def main():
 
     # 환경 인스턴스 — MAPPO/FixedTime 은 ctde_mode=False, CTDE 는 True (Dict obs).
     # 모든 환경이 같은 seed 로 reset 되어 SUMO 차량 수요가 동일하게 재현됨.
-    env_mappo = SumoParallelEnv(**env_kwargs, ctde_mode=False)
+    env_mappo = SumoParallelEnv(**env_kwargs, ctde_mode=False) if module is not None else None
     env_fix   = SumoParallelEnv(**env_kwargs, ctde_mode=False)
     env_ctde = (
         SumoParallelEnv(**env_kwargs, ctde_mode=True, ctde_shared_reward=True)
@@ -248,7 +270,8 @@ def main():
 
     # 동적 METRIC_COLS: num_green에 맞춰 action_*_ratio 컬럼 수 조정
     # (단일·2x2grid 모두 num_green=4 이지만 다른 네트워크 대응)
-    num_green = env_mappo._num_green
+    _ref_env = env_mappo if env_mappo is not None else (env_ctde if env_ctde is not None else env_fix)
+    num_green = _ref_env._num_green
     metric_cols = [
         "avg_waiting_time", "std_waiting_time", "avg_travel_time",
         "total_queue_length", "throughput",
@@ -267,14 +290,21 @@ def main():
         *[f"action_{i}_ratio" for i in range(num_green)],
     ]
 
+    def _select_action(logits):
+        """args.sample=True: Categorical sampling (train 분포 그대로).
+        False: argmax (deterministic, 기본).
+        """
+        if args.sample:
+            return int(torch.distributions.Categorical(logits=logits).sample().item())
+        return int(torch.argmax(logits, dim=-1).item())
+
     def mappo_action(obs_dict, step_idx, agents):
         return {
-            agent: int(torch.argmax(
+            agent: _select_action(
                 module.forward_inference(
                     {"obs": torch.tensor(obs_dict[agent][None], dtype=torch.float32)}
-                )["action_dist_inputs"],
-                dim=-1,
-            ).item())
+                )["action_dist_inputs"]
+            )
             for agent in agents
         }
 
@@ -285,12 +315,11 @@ def main():
         (decentralized execution). 호출자는 평소처럼 ndarray 만 전달하면 됨.
         """
         return {
-            agent: int(torch.argmax(
+            agent: _select_action(
                 module_ctde.forward_inference(
                     {"obs": torch.tensor(obs_dict[agent][None], dtype=torch.float32)}
-                )["action_dist_inputs"],
-                dim=-1,
-            ).item())
+                )["action_dist_inputs"]
+            )
             for agent in agents
         }
 
@@ -305,24 +334,30 @@ def main():
         for ep in range(args.episodes):
             seed = args.seed + ep
 
-            # ── MAPPO ────────────────────────────────────────────────────────
-            info = run_episode(env_mappo, mappo_action, seed=seed)
-            rows.append(_row_from_info("MAPPO", ep, seed, info))
-            r = rows[-1]
-            act_dist_str = ",".join(f"{r.get(f'action_{j}_ratio', 0.0):.2f}"
-                                    for j in range(num_green))
-            print(f"[MAPPO]     ep={ep} seed={seed} | "
-                  f"wait={r['avg_waiting_time']:.1f}s | "
-                  f"queue={r['total_queue_length']:.0f} | "
-                  f"stops/veh={r['avg_stops_per_vehicle']:.2f} | "
-                  f"co2/veh={r['avg_co2_per_vehicle']:.0f} | "
-                  f"speed={r['avg_speed']:.2f} | "
-                  f"act_dist=[{act_dist_str}] | "
-                  f"teleport={r['teleported']:.0f} | "
-                  f"lost_insert={r['vehicles_lost_insert']:.0f} "
-                  f"(pending_peak={r['pending_insert_peak']:.0f}) | "
-                  f"yellow={r['yellow_ratio']*100:.1f}% "
-                  f"(switches={r['phase_switches']:.0f})")
+            # --sample 모드: episode 별 torch 시드 고정 → Categorical sampling 재현 가능
+            # (env seed 와 별도로 torch 난수 stream 을 episode 마다 reset)
+            if args.sample:
+                torch.manual_seed(seed)
+
+            # ── MAPPO (--model 지정 시에만) ───────────────────────────────────
+            if env_mappo is not None:
+                info = run_episode(env_mappo, mappo_action, seed=seed)
+                rows.append(_row_from_info("MAPPO", ep, seed, info))
+                r = rows[-1]
+                act_dist_str = ",".join(f"{r.get(f'action_{j}_ratio', 0.0):.2f}"
+                                        for j in range(num_green))
+                print(f"[MAPPO]     ep={ep} seed={seed} | "
+                      f"wait={r['avg_waiting_time']:.1f}s | "
+                      f"queue={r['total_queue_length']:.0f} | "
+                      f"stops/veh={r['avg_stops_per_vehicle']:.2f} | "
+                      f"co2/veh={r['avg_co2_per_vehicle']:.0f} | "
+                      f"speed={r['avg_speed']:.2f} | "
+                      f"act_dist=[{act_dist_str}] | "
+                      f"teleport={r['teleported']:.0f} | "
+                      f"lost_insert={r['vehicles_lost_insert']:.0f} "
+                      f"(pending_peak={r['pending_insert_peak']:.0f}) | "
+                      f"yellow={r['yellow_ratio']*100:.1f}% "
+                      f"(switches={r['phase_switches']:.0f})")
 
             # ── CTDE (선택, 동일 seed) ────────────────────────────────────────
             if env_ctde is not None:
@@ -355,16 +390,13 @@ def main():
                   f"yellow={r['yellow_ratio']*100:.1f}% "
                   f"(switches={r['phase_switches']:.0f})")
     finally:
-        # 각 cleanup 독립 실행 — Ray 2.10+ algo.stop()/ray.shutdown() hang 회피
-        cleanup_targets = [
-            (env_mappo.close, "env_mappo.close"),
-            (env_fix.close,   "env_fix.close"),
-            (algo.stop,       "algo.stop"),
-        ]
+        # 각 cleanup 독립 실행 — Ray 2.10+ ray.shutdown() hang 회피
+        cleanup_targets = []
+        if env_mappo is not None:
+            cleanup_targets.append((env_mappo.close, "env_mappo.close"))
+        cleanup_targets.append((env_fix.close, "env_fix.close"))
         if env_ctde is not None:
-            cleanup_targets.insert(2, (env_ctde.close, "env_ctde.close"))
-        if algo_ctde is not None:
-            cleanup_targets.append((algo_ctde.stop, "algo_ctde.stop"))
+            cleanup_targets.append((env_ctde.close, "env_ctde.close"))
         cleanup_targets.append((ray.shutdown, "ray.shutdown"))
         for cleanup_fn, name in cleanup_targets:
             try:
@@ -375,9 +407,12 @@ def main():
     # ── 요약 행 추가 (algorithm별 mean / std) ─────────────────────────────
     # CTDE 는 --model-ctde 지정 시에만 rows 에 존재하므로 동적으로 포함
     df_raw = pd.DataFrame(rows)
-    algo_names = ["MAPPO", "FixedTime"]
-    if env_ctde is not None:
-        algo_names.insert(1, "CTDE")  # MAPPO, CTDE, FixedTime 순으로 표시
+    algo_names = []
+    if module is not None:
+        algo_names.append("MAPPO")
+    if module_ctde is not None:
+        algo_names.append("CTDE")
+    algo_names.append("FixedTime")
     summary_rows = []
     for algo_name in algo_names:
         sub = df_raw[df_raw["algorithm"] == algo_name]
@@ -400,7 +435,7 @@ def main():
     # ── 메타데이터 prefix 컬럼 (모든 행에 동일값) ─────────────────────────
     # 캡쳐만 보고도 LLM이 어느 모델·hyperparameter 결과인지 식별 가능
     meta_prefix = {
-        "model_path":        str(Path(args.model).resolve()),
+        "model_path":        (str(Path(args.model).resolve()) if args.model else ""),
         "model_path_ctde":   (str(Path(args.model_ctde).resolve())
                               if args.model_ctde else ""),
         "train_iter":        train_meta.get("train_iter", ""),
@@ -424,13 +459,15 @@ def main():
         df.insert(0, k, v)
 
     # ── 저장 및 출력 ──────────────────────────────────────────────────────
-    csv_out = args.csv_out or _versioned_output(args.model, "results/eval_metrics_mappo", ".csv")
+    _version_src = args.model or args.model_ctde or "results/eval_metrics_mappo"
+    csv_out = args.csv_out or _versioned_output(_version_src, "results/eval_metrics_mappo", ".csv")
     out_path = Path(csv_out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(out_path, index=False)
 
     print(f"\nSaved: {out_path}")
-    print(f"Train metadata: {'loaded' if train_meta else 'not found (older model)'}")
+    if args.model:
+        print(f"Train metadata: {'loaded' if train_meta else 'not found (older model)'}")
     if env_ctde is not None:
         print(f"CTDE metadata:  {'loaded' if train_meta_ctde else 'not found'}")
     print("\n=== Summary (mean ± std) ===")

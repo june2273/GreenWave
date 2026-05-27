@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  2x2 BRT 고밀도 sumocfg — 세종시 실측 100% (~6,130 veh/h, LOS D)
+  사용: map=2x2-brt, traffic=high 시 map_presets.py 가 자동 선택
+  출처: 행복청 제23차 행복도시 교통량 조사 (2025.04) AM peak
+-->
+<configuration xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+               xsi:noNamespaceSchemaLocation="http://sumo.dlr.de/xsd/sumoConfiguration.xsd">
+  <input>
+    <net-file value="2x2_brt.net.xml"/>
+    <route-files value="routes_2x2_brt_dense.rou.xml"/>
+  </input>
+  <time>
+    <begin value="0"/>
+    <end value="3600"/>
+  </time>
+</configuration>

@@ -121,7 +121,7 @@ python evaluate_mappo.py \
 | `3x2` | 6 | 3×2 격자, 모든 edge 2-lane | 21 |
 | `3x2-brt` | 6 | 3×2 + 좌측 열 BRT corridor | 25 |
 
-`--traffic high` : 정체 시나리오 (~1.4 대/초, 2x2 계열에서만 지원)
+`--traffic high` : 정체 시나리오. `2x2` (~1.4 대/초) / `2x2-brt` (~1.7 대/초, 행복청 세종시 AM peak 실측 6,130 veh/h · LOS D)
 
 ---
 

@@ -24,9 +24,7 @@ def _versioned_output(model_path: str, template: str, ext: str) -> str:
 import imageio.v2 as imageio
 import ray
 import torch
-from ray.rllib.algorithms.ppo import PPO
-from ray.rllib.env.wrappers.pettingzoo_env import ParallelPettingZooEnv
-from ray.tune.registry import register_env
+from ray.rllib.core.rl_module.rl_module import RLModule
 
 try:
     from .env_sumo_pz import SumoParallelEnv
@@ -36,8 +34,20 @@ except ImportError:
     from map_presets import MAP_CHOICES, resolve_map_args
 
 
-def _make_env(config: dict) -> ParallelPettingZooEnv:
-    return ParallelPettingZooEnv(SumoParallelEnv(**config))
+def _load_rl_module(model_path: str) -> RLModule:
+    """체크포인트에서 shared_policy RLModule 가중치만 로드 (env runner 없이).
+
+    PPO.from_checkpoint()는 학습 당시 num_env_runners 설정을 복원하며
+    SUMO 환경을 다시 스핀업하려다 실패(IndexError: list index out of range)함.
+    RLModule.from_checkpoint()는 가중치 파일만 읽으므로 SUMO/Ray worker 불필요.
+    """
+    module_path = Path(model_path) / "learner_group" / "learner" / "rl_module" / "shared_policy"
+    if not module_path.exists():
+        raise FileNotFoundError(
+            f"RLModule 체크포인트를 찾을 수 없습니다: {module_path}\n"
+            f"모델 경로가 올바른지 확인하세요: {model_path}"
+        )
+    return RLModule.from_checkpoint(str(module_path))
 
 
 def parse_args():
@@ -48,9 +58,11 @@ def parse_args():
     p.add_argument("--output", type=str, default=None,
                    help="저장 경로 (미지정 시 --model 버전 번호로 자동 생성, "
                         "예: videos/mappo_policy_rollout_4.mp4)")
-    p.add_argument("--fps", type=int, default=30,
-                   help="비디오 재생 fps. continuous 모드는 30fps 권장 "
-                        "(1 sim sec → 1 frame → 30 배속). short 모드는 5~10fps.")
+    p.add_argument("--fps", type=int, default=10,
+                   help="비디오 재생 fps. continuous 모드 기본 10fps "
+                        "(1 sim sec → 1 frame → 10 배속, ~2분 영상). "
+                        "더 빠르게 보려면 20~30, 느리게 보려면 5~8 권장. "
+                        "short 모드는 5fps 권장.")
     p.add_argument("--mode", type=str, default="continuous",
                    choices=["short", "continuous"],
                    help="short: env.step() 마다 1 frame (요약, 720 frame). "
@@ -75,16 +87,30 @@ def parse_args():
     p.add_argument("--brt-weight", type=float, default=1.0,
                    help="env 에 전달할 BRT 가중치 (학습 시와 동일 권장). "
                         "영상 자체에는 영향 없음 (정책 추론만), reward 진단용.")
+    p.add_argument("--sample", action="store_true",
+                   help="argmax 대신 Categorical sampling 으로 행동 선택 "
+                        "(train 과 동일, 확률 mass 그대로 반영). "
+                        "기본 argmax 는 mode collapse 시 비주류 action 을 절대 선택 안 함 — "
+                        "--sample 로 정책의 진짜 행동 분포 시각화 가능. "
+                        "재현성 위해 --seed 고정 필수.")
     return p.parse_args()
 
 
 def main():
     args = parse_args()
 
-    register_env("sumo_pz", _make_env)
+    # CTDE 체크포인트 역직렬화에 CentralizedCriticPPOModule 이 필요 — 항상 선임포트
+    try:
+        from ctde_module import CentralizedCriticPPOModule  # noqa: F401
+    except ImportError:
+        pass
+
     ray.init(ignore_reinit_error=True)
-    algo = PPO.from_checkpoint(str(Path(args.model).resolve()))
-    module = algo.get_module("shared_policy")
+    module = _load_rl_module(str(Path(args.model).resolve()))
+
+    # --sample 모드: torch 난수 시드 고정으로 Categorical sampling 재현성 확보
+    if args.sample:
+        torch.manual_seed(args.seed)
 
     # --map 으로부터 sumo_cfg / tls_ids 결정 (preset 사용)
     sumo_cfg_effective, tls_ids_effective = resolve_map_args(
@@ -119,14 +145,21 @@ def main():
         if args.mode == "continuous":
             env.add_step_hook(lambda sim_step: frames.append(env.render()))
 
+        def _select_action(logits):
+            """args.sample=True: Categorical sampling (train 동일 분포).
+            False: argmax (deterministic, 기본).
+            """
+            if args.sample:
+                return int(torch.distributions.Categorical(logits=logits).sample().item())
+            return int(torch.argmax(logits, dim=-1).item())
+
         while env.agents:
             actions = {
-                agent: int(torch.argmax(
+                agent: _select_action(
                     module.forward_inference(
                         {"obs": torch.tensor(obs_dict[agent][None], dtype=torch.float32)}
-                    )["action_dist_inputs"],
-                    dim=-1,
-                ).item())
+                    )["action_dist_inputs"]
+                )
                 for agent in env.agents
             }
             obs_dict, _, _, _, _ = env.step(actions)
@@ -134,10 +167,9 @@ def main():
             if args.mode == "short":
                 frames.append(env.render())
     finally:
-        # 각 cleanup 독립 실행 — Ray 2.10+ algo.stop()/ray.shutdown() hang 회피
+        # 각 cleanup 독립 실행 — Ray 2.10+ ray.shutdown() hang 회피
         for cleanup_fn, name in (
             (env.close,    "env.close"),
-            (algo.stop,    "algo.stop"),
             (ray.shutdown, "ray.shutdown"),
         ):
             try:

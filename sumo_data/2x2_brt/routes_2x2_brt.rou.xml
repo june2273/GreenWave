@@ -1,33 +1,49 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
-  2x2 BRT routes
-  - 일반 차량 (car): 기존 routes_2x2_dense 와 동일 demand (~5,040 veh/hr)
-    8 직진 flows × 0.15 + 4 cross flows × 0.05
-  - BRT 차량 (brt): 좌측 vertical corridor 양방향, 60초/대 (시간당 60대)
-    departLane="2" 로 BRT lane 강제
+  2x2 BRT default routes — 세종시 실측 분포 0.59x 스케일 (~3,600 veh/h)
+  사용: map=2x2-brt (traffic 인자 없거나 default)
+
+  설계:
+    * 분포 패턴은 세종시 실측 (BRT corridor v1 > 일반 도로 v2) 유지
+    * 강도만 0.59x 로 낮춰 빠른 학습 iteration & 좌회전 phase 학습 보장
+    * 고밀도(traffic=high) 모드는 routes_2x2_brt_dense.rou.xml 참조
+
+  Edge flow (세종 실측 × 0.59):
+    v1 (BRT corridor): 980×0.59 ≈ 580 veh/h/방향
+    v2 (right col):    470×0.59 ≈ 280 veh/h/방향
+    h1, h2 (rows):     750×0.59 ≈ 440 veh/h/방향
+    cross flows:       원본 비율 보존 (30~60 veh/h)
+
+  총 네트워크 수요: ~3,650 veh/h (≈ LOS B-C 수준)
+  BRT: 평시 10분 배차 (6대/hr/방향)
 -->
 <routes>
     <vType id="car" vClass="passenger" length="5"  minGap="2.5" maxSpeed="13.89"/>
     <vType id="brt" vClass="bus"       length="12" minGap="3"   maxSpeed="13.89"/>
 
-    <!-- ─ 일반 차량 직진 (8 flows, 각 probability 0.15) ─ -->
-    <flow id="h1_e" type="car" from="-h11" to="-h13" begin="0" end="100000" probability="0.15" departSpeed="max" departPos="base" departLane="best"/>
-    <flow id="h1_w" type="car" from="h13"  to="h11"  begin="0" end="100000" probability="0.15" departSpeed="max" departPos="base" departLane="best"/>
-    <flow id="h2_e" type="car" from="-h21" to="-h23" begin="0" end="100000" probability="0.15" departSpeed="max" departPos="base" departLane="best"/>
-    <flow id="h2_w" type="car" from="h23"  to="h21"  begin="0" end="100000" probability="0.15" departSpeed="max" departPos="base" departLane="best"/>
-    <flow id="v1_s" type="car" from="-v11" to="-v13" begin="0" end="100000" probability="0.15" departSpeed="max" departPos="base" departLane="best"/>
-    <flow id="v1_n" type="car" from="v13"  to="v11"  begin="0" end="100000" probability="0.15" departSpeed="max" departPos="base" departLane="best"/>
-    <flow id="v2_s" type="car" from="-v21" to="-v23" begin="0" end="100000" probability="0.15" departSpeed="max" departPos="base" departLane="best"/>
-    <flow id="v2_n" type="car" from="v23"  to="v21"  begin="0" end="100000" probability="0.15" departSpeed="max" departPos="base" departLane="best"/>
+    <!-- ─ BRT corridor (v1, 좌측 열) — 580 veh/h/방향 ────────────────────── -->
+    <flow id="v1_s" type="car" from="-v11" to="-v13" begin="0" end="100000" vehsPerHour="580" departSpeed="max" departPos="base" departLane="best"/>
+    <flow id="v1_n" type="car" from="v13"  to="v11"  begin="0" end="100000" vehsPerHour="580" departSpeed="max" departPos="base" departLane="best"/>
 
-    <!-- ─ Cross (좌회전) — 4 flows, 각 probability 0.05 ─ -->
-    <flow id="cross1" type="car" from="-h11" to="v11"  begin="0" end="100000" probability="0.05" departSpeed="max" departPos="base" departLane="best"/>
-    <flow id="cross2" type="car" from="-h21" to="-v23" begin="0" end="100000" probability="0.05" departSpeed="max" departPos="base" departLane="best"/>
-    <flow id="cross3" type="car" from="-v11" to="-h13" begin="0" end="100000" probability="0.05" departSpeed="max" departPos="base" departLane="best"/>
-    <flow id="cross4" type="car" from="-v21" to="h11"  begin="0" end="100000" probability="0.05" departSpeed="max" departPos="base" departLane="best"/>
+    <!-- ─ 우측 열 (v2) — 280 veh/h/방향 ─────────────────────────────────── -->
+    <flow id="v2_s" type="car" from="-v21" to="-v23" begin="0" end="100000" vehsPerHour="280" departSpeed="max" departPos="base" departLane="best"/>
+    <flow id="v2_n" type="car" from="v23"  to="v21"  begin="0" end="100000" vehsPerHour="280" departSpeed="max" departPos="base" departLane="best"/>
 
-    <!-- ─ BRT — 좌측 vertical corridor 양방향 (60초/대) ─ -->
-    <!-- departLane="2" 로 BRT 전용 lane 강제 사용 -->
-    <flow id="brt_s" type="brt" from="-v11" to="-v13" begin="0" end="100000" period="60" departSpeed="max" departPos="base" departLane="2"/>
-    <flow id="brt_n" type="brt" from="v13"  to="v11"  begin="0" end="100000" period="60" departSpeed="max" departPos="base" departLane="2"/>
+    <!-- ─ 상단 행 (h1) — 440 veh/h/방향 ─────────────────────────────────── -->
+    <flow id="h1_e" type="car" from="-h11" to="-h13" begin="0" end="100000" vehsPerHour="440" departSpeed="max" departPos="base" departLane="best"/>
+    <flow id="h1_w" type="car" from="h13"  to="h11"  begin="0" end="100000" vehsPerHour="440" departSpeed="max" departPos="base" departLane="best"/>
+
+    <!-- ─ 하단 행 (h2) — 440 veh/h/방향 ─────────────────────────────────── -->
+    <flow id="h2_e" type="car" from="-h21" to="-h23" begin="0" end="100000" vehsPerHour="440" departSpeed="max" departPos="base" departLane="best"/>
+    <flow id="h2_w" type="car" from="h23"  to="h21"  begin="0" end="100000" vehsPerHour="440" departSpeed="max" departPos="base" departLane="best"/>
+
+    <!-- ─ 좌회전 cross flows (Sejong 분포 × 0.59) ───────────────────────── -->
+    <flow id="cross1" type="car" from="-h11" to="v11"  begin="0" end="100000" vehsPerHour="50" departSpeed="max" departPos="base" departLane="best"/>
+    <flow id="cross2" type="car" from="-h21" to="-v23" begin="0" end="100000" vehsPerHour="30" departSpeed="max" departPos="base" departLane="best"/>
+    <flow id="cross3" type="car" from="-v11" to="-h13" begin="0" end="100000" vehsPerHour="60" departSpeed="max" departPos="base" departLane="best"/>
+    <flow id="cross4" type="car" from="-v21" to="h11"  begin="0" end="100000" vehsPerHour="30" departSpeed="max" departPos="base" departLane="best"/>
+
+    <!-- ─ BRT (평시 10분 배차, 6대/hr/방향) ─────────────────────────────── -->
+    <flow id="brt_s" type="brt" from="-v11" to="-v13" begin="0" end="100000" period="600" departSpeed="max" departPos="base" departLane="2"/>
+    <flow id="brt_n" type="brt" from="v13"  to="v11"  begin="0" end="100000" period="600" departSpeed="max" departPos="base" departLane="2"/>
 </routes>

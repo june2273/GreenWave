@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  2x2 BRT 고밀도 routes — 세종시 실측 100% 적용 (LOS D)
+  사용: map=2x2-brt, traffic=high
+
+  출처: 행복청 제23차 행복도시 교통량 조사 (2025.04), AM peak
+    ⑪ 성금교차로     4,245 pcu/h  (LOS D, 65.5초 지체)
+    ⑫ 어진교차로     3,959 pcu/h  (LOS D, 63.7초)
+    ⑳ 청사교차로     2,593 pcu/h  (LOS D, 51.7초)
+    ㉑ 갈매로-가름로  2,782 pcu/h  (LOS D, 53.4초)
+
+  TLS 매핑:
+    TLS 1 (top-left, BRT)    ↔ 성금 (3,693 veh/h, pcu×0.87)
+    TLS 5 (bottom-left, BRT) ↔ 어진 (3,444 veh/h)
+    TLS 2 (top-right)        ↔ 청사 (2,256 veh/h)
+    TLS 6 (bottom-right)     ↔ 갈매로 (2,420 veh/h)
+
+  Edge flow 산출 (NS:EW = 55:45 BRT축 / 40:60 우측열):
+    v1 (BRT corridor): avg(성금_NS, 어진_NS) / 2 ≈ 980 veh/h/방향
+    v2 (right col):    avg(청사_NS, 갈매로_NS) / 2 ≈ 470 veh/h/방향
+    h1 (top row):      avg(성금_EW, 청사_EW) / 2 ≈ 750 veh/h/방향
+    h2 (bottom row):   avg(어진_EW, 갈매로_EW) / 2 ≈ 750 veh/h/방향
+    cross flows:       직진의 7-10% (좌회전 비율 가정)
+
+  총 네트워크 수요: ~6,130 veh/h
+  BRT: 세종 갈매로선 B1 AM peak 6분 배차 (10대/hr/방향)
+-->
+<routes>
+    <vType id="car" vClass="passenger" length="5"  minGap="2.5" maxSpeed="13.89"/>
+    <vType id="brt" vClass="bus"       length="12" minGap="3"   maxSpeed="13.89"/>
+
+    <!-- ─ BRT corridor (v1, 좌측 열) — 980 veh/h/방향 ────────────────────── -->
+    <flow id="v1_s" type="car" from="-v11" to="-v13" begin="0" end="100000" vehsPerHour="980" departSpeed="max" departPos="base" departLane="best"/>
+    <flow id="v1_n" type="car" from="v13"  to="v11"  begin="0" end="100000" vehsPerHour="980" departSpeed="max" departPos="base" departLane="best"/>
+
+    <!-- ─ 우측 열 (v2) — 470 veh/h/방향 ─────────────────────────────────── -->
+    <flow id="v2_s" type="car" from="-v21" to="-v23" begin="0" end="100000" vehsPerHour="470" departSpeed="max" departPos="base" departLane="best"/>
+    <flow id="v2_n" type="car" from="v23"  to="v21"  begin="0" end="100000" vehsPerHour="470" departSpeed="max" departPos="base" departLane="best"/>
+
+    <!-- ─ 상단 행 (h1) — 750 veh/h/방향 ─────────────────────────────────── -->
+    <flow id="h1_e" type="car" from="-h11" to="-h13" begin="0" end="100000" vehsPerHour="750" departSpeed="max" departPos="base" departLane="best"/>
+    <flow id="h1_w" type="car" from="h13"  to="h11"  begin="0" end="100000" vehsPerHour="750" departSpeed="max" departPos="base" departLane="best"/>
+
+    <!-- ─ 하단 행 (h2) — 750 veh/h/방향 ─────────────────────────────────── -->
+    <flow id="h2_e" type="car" from="-h21" to="-h23" begin="0" end="100000" vehsPerHour="750" departSpeed="max" departPos="base" departLane="best"/>
+    <flow id="h2_w" type="car" from="h23"  to="h21"  begin="0" end="100000" vehsPerHour="750" departSpeed="max" departPos="base" departLane="best"/>
+
+    <!-- ─ 좌회전 cross flows (직진의 7-10%) ─────────────────────────────── -->
+    <flow id="cross1" type="car" from="-h11" to="v11"  begin="0" end="100000" vehsPerHour="80"  departSpeed="max" departPos="base" departLane="best"/>
+    <flow id="cross2" type="car" from="-h21" to="-v23" begin="0" end="100000" vehsPerHour="50"  departSpeed="max" departPos="base" departLane="best"/>
+    <flow id="cross3" type="car" from="-v11" to="-h13" begin="0" end="100000" vehsPerHour="100" departSpeed="max" departPos="base" departLane="best"/>
+    <flow id="cross4" type="car" from="-v21" to="h11"  begin="0" end="100000" vehsPerHour="50"  departSpeed="max" departPos="base" departLane="best"/>
+
+    <!-- ─ BRT (갈매로선 AM peak 6분 배차, 10대/hr/방향) ─────────────────── -->
+    <flow id="brt_s" type="brt" from="-v11" to="-v13" begin="0" end="100000" period="360" departSpeed="max" departPos="base" departLane="2"/>
+    <flow id="brt_n" type="brt" from="v13"  to="v11"  begin="0" end="100000" period="360" departSpeed="max" departPos="base" departLane="2"/>
+</routes>
