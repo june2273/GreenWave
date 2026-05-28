@@ -3,7 +3,7 @@
   3x2 BRT routes (default, ~6,120 veh/h)
   - 일반 차량: 3x2 base 와 동일 demand (probability 기반)
   - BRT: 좌측 corridor 양방향, 6분 배차 (10대/h/방향, 세종 BRT 표준)
-  세종시 실측 고밀도 버전 → routes_3x2_brt_dense.rou.xml (--traffic high)
+  세종시 실측 고밀도 버전 → routes_3x2_brt_dense.rou.xml (traffic=high)
 -->
 <routes>
     <vType id="car" vClass="passenger" length="5"  minGap="2.5" maxSpeed="13.89"/>

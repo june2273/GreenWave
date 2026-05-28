@@ -1,28 +1,50 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
-  3x2 base routes
-  Demand: 6 horizontal + 4 vertical + 4 cross = total ~1.7 veh/s ≈ 6,120 veh/hr
+  3x2 base routes — 비-BRT 일반 도로 (양방향 직진 + 좌회전 cross 강화)
+
+  설계 목표: 공모전 확장성 — BRT 없는 일반 6교차로 시나리오로
+             좌회전 phase 학습/평가가 의미 있게 작동.
+
+  이전(probability 기반): 10 straight × 0.15 + 4 cross × 0.05
+    → cross/total ≈ 11.8% (argmax trap 회피 임계 ~13% 못 미침)
+    → 일부 좌회전 학습은 되나, deterministic eval 시 좌회전 phase 미선택 가능성
+
+  본 파일 설계:
+    * vehsPerHour 기반으로 명시화 (디버깅·재현 용이)
+    * cross/total ≈ 13.8% 로 강화 (도시 좌회전 평균 13-15% 범위)
+    * 4축 대칭 (BRT corridor 없음)
+
+  Demand:
+    수평 직진: 6 flow (3 row × 양방향) × 450 veh/h = 2,700 veh/h
+    수직 직진: 4 flow (2 col × 양방향) × 450 veh/h = 1,800 veh/h
+    cross:    4 flow × 180 veh/h               = 720 veh/h (cross/total ≈ 13.8%)
+    총:        ~5,220 veh/h (LOS B-C, 학습 iteration 용)
+
+  비교:
+    - 3x2-brt default (probability): ~6,120 veh/h, cross 11.8%, BRT 포함
+    - 본 파일:                       ~5,220 veh/h, cross 13.8%, BRT 없음
+    - 3x2-brt dense (실측):          ~8,530 veh/h (세종시 최종, traffic=high)
 -->
 <routes>
     <vType id="car" vClass="passenger" length="5" minGap="2.5" maxSpeed="13.89"/>
 
-    <!-- ─ 수평 직진 (3 rows x 2 방향, 6 flows) ─ -->
-    <flow id="h1_e" type="car" from="-h11" to="-h13" begin="0" end="100000" probability="0.15" departSpeed="max" departPos="base" departLane="best"/>
-    <flow id="h1_w" type="car" from="h13"  to="h11"  begin="0" end="100000" probability="0.15" departSpeed="max" departPos="base" departLane="best"/>
-    <flow id="h2_e" type="car" from="-h21" to="-h23" begin="0" end="100000" probability="0.15" departSpeed="max" departPos="base" departLane="best"/>
-    <flow id="h2_w" type="car" from="h23"  to="h21"  begin="0" end="100000" probability="0.15" departSpeed="max" departPos="base" departLane="best"/>
-    <flow id="h3_e" type="car" from="-h31" to="-h33" begin="0" end="100000" probability="0.15" departSpeed="max" departPos="base" departLane="best"/>
-    <flow id="h3_w" type="car" from="h33"  to="h31"  begin="0" end="100000" probability="0.15" departSpeed="max" departPos="base" departLane="best"/>
+    <!-- ─ 수평 직진 (3 rows × 2 방향, 6 flows) — 450 veh/h/방향 ────────── -->
+    <flow id="h1_e" type="car" from="-h11" to="-h13" begin="0" end="100000" vehsPerHour="450" departSpeed="max" departPos="base" departLane="best"/>
+    <flow id="h1_w" type="car" from="h13"  to="h11"  begin="0" end="100000" vehsPerHour="450" departSpeed="max" departPos="base" departLane="best"/>
+    <flow id="h2_e" type="car" from="-h21" to="-h23" begin="0" end="100000" vehsPerHour="450" departSpeed="max" departPos="base" departLane="best"/>
+    <flow id="h2_w" type="car" from="h23"  to="h21"  begin="0" end="100000" vehsPerHour="450" departSpeed="max" departPos="base" departLane="best"/>
+    <flow id="h3_e" type="car" from="-h31" to="-h33" begin="0" end="100000" vehsPerHour="450" departSpeed="max" departPos="base" departLane="best"/>
+    <flow id="h3_w" type="car" from="h33"  to="h31"  begin="0" end="100000" vehsPerHour="450" departSpeed="max" departPos="base" departLane="best"/>
 
-    <!-- ─ 수직 직진 (2 cols x 2 방향, 4 flows) ─ -->
-    <flow id="v1_s" type="car" from="-v11" to="-v14" begin="0" end="100000" probability="0.15" departSpeed="max" departPos="base" departLane="best"/>
-    <flow id="v1_n" type="car" from="v14"  to="v11"  begin="0" end="100000" probability="0.15" departSpeed="max" departPos="base" departLane="best"/>
-    <flow id="v2_s" type="car" from="-v21" to="-v24" begin="0" end="100000" probability="0.15" departSpeed="max" departPos="base" departLane="best"/>
-    <flow id="v2_n" type="car" from="v24"  to="v21"  begin="0" end="100000" probability="0.15" departSpeed="max" departPos="base" departLane="best"/>
+    <!-- ─ 수직 직진 (2 cols × 2 방향, 4 flows) — 450 veh/h/방향 ────────── -->
+    <flow id="v1_s" type="car" from="-v11" to="-v14" begin="0" end="100000" vehsPerHour="450" departSpeed="max" departPos="base" departLane="best"/>
+    <flow id="v1_n" type="car" from="v14"  to="v11"  begin="0" end="100000" vehsPerHour="450" departSpeed="max" departPos="base" departLane="best"/>
+    <flow id="v2_s" type="car" from="-v21" to="-v24" begin="0" end="100000" vehsPerHour="450" departSpeed="max" departPos="base" departLane="best"/>
+    <flow id="v2_n" type="car" from="v24"  to="v21"  begin="0" end="100000" vehsPerHour="450" departSpeed="max" departPos="base" departLane="best"/>
 
-    <!-- ─ Cross (좌회전 cross-grid, 4 flows) ─ -->
-    <flow id="cross1" type="car" from="-h11" to="v11"  begin="0" end="100000" probability="0.05" departSpeed="max" departPos="base" departLane="best"/>
-    <flow id="cross2" type="car" from="-h31" to="-v24" begin="0" end="100000" probability="0.05" departSpeed="max" departPos="base" departLane="best"/>
-    <flow id="cross3" type="car" from="-v11" to="-h13" begin="0" end="100000" probability="0.05" departSpeed="max" departPos="base" departLane="best"/>
-    <flow id="cross4" type="car" from="-v21" to="h31"  begin="0" end="100000" probability="0.05" departSpeed="max" departPos="base" departLane="best"/>
+    <!-- ─ 좌회전 cross flows (도시 좌회전 비율 ~14%, 균등 분포) ─────────── -->
+    <flow id="cross1" type="car" from="-h11" to="v11"  begin="0" end="100000" vehsPerHour="180" departSpeed="max" departPos="base" departLane="best"/>
+    <flow id="cross2" type="car" from="-h31" to="-v24" begin="0" end="100000" vehsPerHour="180" departSpeed="max" departPos="base" departLane="best"/>
+    <flow id="cross3" type="car" from="-v11" to="-h13" begin="0" end="100000" vehsPerHour="180" departSpeed="max" departPos="base" departLane="best"/>
+    <flow id="cross4" type="car" from="-v21" to="h31"  begin="0" end="100000" vehsPerHour="180" departSpeed="max" departPos="base" departLane="best"/>
 </routes>

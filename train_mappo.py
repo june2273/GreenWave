@@ -199,6 +199,93 @@ def _build_callback():
     return GreenWaveMetricsCallback
 
 
+# ──────────────────────────────────────────────────────────────────────────────
+# Chain training 헬퍼 — 체크포인트 복원 + metadata merge
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _load_resume_metadata(resume_path: str) -> dict:
+    """체크포인트의 train_metadata.json 로드. 없으면 빈 dict + 경고."""
+    meta_path = Path(resume_path) / "train_metadata.json"
+    if not meta_path.exists():
+        print(f"[resume] 경고: {meta_path} 없음 → 모든 설정을 CLI/default 에서 가져옴.")
+        return {}
+    try:
+        meta = json.loads(meta_path.read_text())
+        print(f"[resume] metadata 로드: iter={meta.get('train_iter', '?')}, "
+              f"steps={meta.get('train_total_steps', '?')}, "
+              f"map={meta.get('map', '?')}, ctde={meta.get('ctde_mode', False)}")
+        return meta
+    except json.JSONDecodeError as e:
+        print(f"[resume] 경고: metadata 파싱 실패 ({e}) → 빈 dict 사용")
+        return {}
+
+
+def _validate_resume_compat(prev_meta: dict, args) -> None:
+    """resume 시 변경 불가능한 설정 충돌 검출.
+
+    - ctde_mode 변경은 architecture 차이로 거부 (actor-critic 구조 자체 다름)
+    - map 변경은 transfer learning 으로 경고만 (obs shape 호환 시 진행)
+    """
+    if not prev_meta:
+        return
+    prev_ctde = bool(prev_meta.get("ctde_mode", False))
+    new_ctde  = bool(args.ctde)
+    if prev_ctde != new_ctde:
+        raise ValueError(
+            f"[resume] ctde_mode 변경 불가: 이전={prev_ctde}, 현재={new_ctde}. "
+            f"CTDE↔MAPPO 전환은 architecture 가 달라 weights 호환 불가. "
+            f"새 학습으로 진행하세요 (--resume-from 빼기)."
+        )
+    prev_map = prev_meta.get("map")
+    if prev_map and prev_map != args.map:
+        print(f"[resume] ⚠ map 변경 {prev_map} → {args.map} "
+              f"(transfer learning, obs space 호환되어야 함)")
+
+
+def _restore_algo(config, resume_path: str, weights_only: bool):
+    """체크포인트 복원.
+
+    Strategy:
+      1. weights_only=False 면 Algorithm.from_checkpoint 시도 (optimizer state 포함)
+      2. 실패하거나 weights_only=True 면 새 algo 빌드 + RLModule weights 만 주입
+    """
+    if not weights_only:
+        try:
+            from ray.rllib.algorithms.algorithm import Algorithm
+            algo = Algorithm.from_checkpoint(resume_path)
+            print(f"[resume] Algorithm.from_checkpoint 성공 — optimizer state 포함 복원")
+            return algo, False  # weights_only=False
+        except Exception as e:
+            print(f"[resume] from_checkpoint 실패: {type(e).__name__}: {e}")
+            print(f"[resume] → weights-only fallback 으로 전환")
+
+    # Fallback: 새 algo 빌드 후 RLModule weights 만 주입
+    algo = config.build_algo()
+    rl_module_path = Path(resume_path) / "learner_group" / "learner" / "rl_module" / "shared_policy"
+    if not rl_module_path.exists():
+        raise FileNotFoundError(
+            f"[resume] RLModule 경로 없음: {rl_module_path}\n"
+            f"체크포인트가 올바른 구조인지 확인하세요."
+        )
+
+    from ray.rllib.core.rl_module.rl_module import RLModule
+    loaded_module = RLModule.from_checkpoint(str(rl_module_path))
+    state = loaded_module.get_state()
+    # Learner 에 weights 주입
+    algo.learner_group.set_state({
+        "learner": {"rl_module": {"shared_policy": state}}
+    })
+    # env_runner 들에도 sync (다음 sample 전에 반영되도록)
+    try:
+        algo.env_runner_group.sync_weights()
+    except AttributeError:
+        # Ray 버전별 attribute 이름 차이 (workers vs env_runner_group)
+        if hasattr(algo, "workers"):
+            algo.workers.sync_weights()
+    print(f"[resume] weights-only 복원 완료 (optimizer 는 새로 시작 — lr scheduler/momentum 손실)")
+    return algo, True  # weights_only=True
+
+
 def parse_args():
     p = argparse.ArgumentParser(description="Train MAPPO on SUMO intersection(s)")
     p.add_argument("--num-iters", type=int, default=200,
@@ -254,6 +341,27 @@ def parse_args():
                    choices=["shared", "local"],
                    help="--ctde 와 함께 사용. shared: 모든 agent 가 mean(local rewards) 받음 "
                         "(global coordination). local: 기존 per-agent reward 유지.")
+    # ── Chain training (체크포인트 이어서 학습) ──────────────────────────
+    p.add_argument("--resume-from", type=str, default=None,
+                   help="체크포인트 디렉터리 경로 (예: models/MAPPO_sumo_2). "
+                        "지정 시 해당 모델의 가중치 + 옵티마이저 상태에서 이어서 학습. "
+                        "train_metadata.json 의 hyperparameters 가 기본값으로 사용되며, "
+                        "CLI 인자로 명시한 값은 그것이 우선 (fine-tune 용). "
+                        "--num-iters 는 '추가로 더 학습할 횟수' 를 의미.")
+    p.add_argument("--resume-weights-only", action="store_true",
+                   help="--resume-from 과 함께 사용. 가중치만 로드하고 옵티마이저는 "
+                        "새로 초기화. lr/optimizer 설정 크게 변경 시 권장.")
+    # resume 시 metadata 덮어쓰기용 (None = CLI 미명시, metadata 값 또는 default 사용)
+    p.add_argument("--lr", type=float, default=None,
+                   help="learning rate override. resume 시 metadata 값보다 우선. "
+                        "미명시 시 metadata 값 (없으면 1e-4).")
+    p.add_argument("--entropy-coeff", type=float, default=None,
+                   help="entropy coefficient override. resume 시 metadata 값보다 우선. "
+                        "미명시 시 metadata 값 (없으면 0.03).")
+    p.add_argument("--train-batch-size", type=int, default=None,
+                   help="PPO 배치 크기 (스텝 수). "
+                        "미명시 시 metadata 값 (없으면 8000). "
+                        "Colab/빠른 실험: 4000 권장 (iter 당 시간 약 2배 단축, gradient 품질 소폭 저하).")
     return p.parse_args()
 
 
@@ -267,6 +375,16 @@ def main():
 
     register_env("sumo_pz", _make_env)
     ray.init(ignore_reinit_error=True)
+
+    # ── resume 메타데이터 로드 (있으면) ──────────────────────────────────
+    resume_meta: dict = {}
+    resume_path_abs: str = ""
+    if args.resume_from:
+        resume_path_abs = str(Path(args.resume_from).resolve())
+        if not Path(resume_path_abs).exists():
+            raise FileNotFoundError(f"[resume] 경로 없음: {resume_path_abs}")
+        resume_meta = _load_resume_metadata(resume_path_abs)
+        _validate_resume_compat(resume_meta, args)
 
     # --map 으로부터 sumo_cfg / tls_ids 결정 (preset 사용)
     sumo_cfg_effective, tls_ids_effective = resolve_map_args(
@@ -334,18 +452,28 @@ def main():
     #                                            1000.0 으로 복원
     #   (C4) train_batch_size 4000 → 8000   — gradient noise variance 감소 (∝ 1/N)
 
+    # CLI 명시값 > resume metadata > default 우선순위로 hparams 결정.
+    # args.lr / args.entropy_coeff 는 default=None 이라서 None=미명시 구분 가능.
+    def _pick(cli_val, meta_key, default):
+        if cli_val is not None:
+            return cli_val
+        return resume_meta.get(meta_key, default)
+
     hparams = dict(
-        lr=1e-4,
+        lr=_pick(args.lr, "lr", 1e-4),
         gamma=0.99,
-        train_batch_size=8000,    # C4: 4000 → 8000
+        train_batch_size=_pick(args.train_batch_size, "train_batch_size", 8000),
         num_epochs=6,
         minibatch_size=128,
         lambda_=0.95,
         clip_param=0.2,
         vf_loss_coeff=0.5,
-        entropy_coeff=0.03,       # B5: 0.005 → 0.03 (mode collapse 방지, 좌회전 phase 탐색)
+        entropy_coeff=_pick(args.entropy_coeff, "entropy_coeff", 0.03),
         vf_clip_param=1000.0,     # A3: 500 → 10 → 1000 (VF signal 복원)
     )
+    if args.resume_from:
+        print(f"[resume] hparams: lr={hparams['lr']} entropy_coeff={hparams['entropy_coeff']} "
+              f"(CLI override 시 그것이 우선)")
 
     config = (
         PPOConfig()
@@ -396,20 +524,45 @@ def main():
             )
         )
 
-    algo = config.build_algo()
+    # algo 빌드: resume 면 from_checkpoint, 아니면 새로 빌드.
+    # weights_only_actual 은 fallback 여부 추적용 (steps_offset 계산에 사용).
+    if args.resume_from:
+        algo, weights_only_actual = _restore_algo(
+            config, resume_path_abs, args.resume_weights_only
+        )
+    else:
+        algo = config.build_algo()
+        weights_only_actual = False
+
     # algo.save()는 절대 경로 필요 (pyarrow URI 파싱 때문에 상대 경로 불가)
-    # CTDE 모드면 MAPPO_CTDE_sumo_N, 아니면 기존 MAPPO_sumo_N
+    # 저장 경로:
+    #   - --out 명시: 그것 사용 (fork)
+    #   - resume 시 --out 미명시: 원본 경로 덮어쓰기
+    #   - 새 학습: MAPPO_sumo_N / MAPPO_CTDE_sumo_N 자동 버전
     algo_prefix = "MAPPO_CTDE" if args.ctde else "MAPPO"
-    out_path = str(Path(
-        args.out if args.out else _next_out_path(algo=algo_prefix)
-    ).resolve())
+    if args.out:
+        out_path = str(Path(args.out).resolve())
+    elif args.resume_from:
+        out_path = resume_path_abs  # 덮어쓰기 (이미 절대경로)
+        print(f"[resume] 저장 경로 = 원본 ({out_path}). fork 하려면 --out 명시.")
+    else:
+        out_path = str(Path(_next_out_path(algo=algo_prefix)).resolve())
     Path(out_path).mkdir(parents=True, exist_ok=True)
 
     run_name = Path(out_path).name
     tb_writer = SummaryWriter(log_dir=f"results/tb_mappo/{run_name}")
 
-    # 학습 메타데이터 (평가 시 CSV에 복제되어 출처 추적 가능)
+    # iter / step offset: resume 시 TB·메타데이터를 끊김 없이 이어붙임.
+    iter_offset  = int(resume_meta.get("train_iter", 0))        if args.resume_from else 0
+    steps_offset = int(resume_meta.get("train_total_steps", 0)) if args.resume_from else 0
+    if iter_offset > 0:
+        print(f"[resume] iter_offset={iter_offset}, steps_offset={steps_offset} "
+              f"→ TB 에는 {iter_offset+1} ~ {iter_offset+args.num_iters} 로 기록")
+
+    # 학습 메타데이터 (평가 시 CSV에 복제되어 출처 추적 가능).
+    # resume 면 이전 메타에 일부 키 보존 + 새 값으로 덮어쓰기.
     train_meta = {
+        **resume_meta,           # 이전 메타 (있으면) 일부 보존
         "model_name":   run_name,
         "model_path":   out_path,
         "map":          args.map,
@@ -427,9 +580,13 @@ def main():
         "brt_weight":   args.brt_weight,
         "ctde_mode":    bool(args.ctde),
         "ctde_reward":  args.ctde_reward if args.ctde else None,
-        # 학습 중 갱신됨
-        "train_iter":        0,
-        "train_total_steps": 0,
+        # resume 출처 추적
+        "resume_from":         args.resume_from,
+        "resume_weights_only": bool(weights_only_actual) if args.resume_from else False,
+        "resume_iter_offset":  iter_offset,
+        # 학습 중 갱신됨 (offset 부터 시작)
+        "train_iter":        iter_offset,
+        "train_total_steps": steps_offset,
         **hparams,
     }
 
@@ -441,8 +598,14 @@ def main():
     ctde_tag = (
         f"CTDE (reward={args.ctde_reward})" if args.ctde else "MAPPO (decentralized critic)"
     )
-    print(f"학습 시작 [{ctde_tag}] | iters={args.num_iters} | workers={args.num_workers} "
-          f"| tls={tls_ids_effective} | reward={args.reward_mode} | seed={args.seed} | out={out_path}")
+    mode_tag = (
+        f"RESUME from {args.resume_from}" + (" (weights-only)" if weights_only_actual else "")
+        if args.resume_from else "FRESH"
+    )
+    print(f"학습 시작 [{mode_tag}] [{ctde_tag}] | "
+          f"iters={args.num_iters}" + (f" (+offset {iter_offset})" if iter_offset else "") +
+          f" | workers={args.num_workers} | tls={tls_ids_effective} | "
+          f"reward={args.reward_mode} | seed={args.seed} | out={out_path}")
     print(f"TensorBoard: tensorboard --logdir results/tb_mappo")
 
     try:
@@ -451,14 +614,25 @@ def main():
             result = algo.train()
             iter_time = time.time() - t0
 
+            # resume 시 TB·메타에는 global_iter (offset 누적) 로 기록 → 곡선 연속.
+            global_iter = i + iter_offset
+
             # Ray 2.10+: 지표 경로 변경 (env_runner_results→env_runners, learner_results→learners)
-            env_stats    = result.get("env_runners", {})
-            mean_rew     = env_stats.get("episode_return_mean", float("nan"))
-            ep_len       = env_stats.get("episode_len_mean",    float("nan"))
-            total_steps  = result.get("num_env_steps_sampled_lifetime", 0)
-            tb_writer.add_scalar("reward/mean",       mean_rew,    i)
-            tb_writer.add_scalar("episode/len_mean",  ep_len,      i)
-            tb_writer.add_scalar("train/total_steps", total_steps, i)
+            env_stats   = result.get("env_runners", {})
+            mean_rew    = env_stats.get("episode_return_mean", float("nan"))
+            ep_len      = env_stats.get("episode_len_mean",    float("nan"))
+            # total_steps 처리:
+            #   - from_checkpoint 로 복원: lifetime 이 이미 누적 (offset 더하면 중복)
+            #   - weights-only 또는 fresh: lifetime 이 0부터 → offset 더해야 함
+            raw_steps = result.get("num_env_steps_sampled_lifetime", 0)
+            if args.resume_from and not weights_only_actual:
+                total_steps = raw_steps  # 이미 누적되어 있음
+            else:
+                total_steps = raw_steps + steps_offset
+
+            tb_writer.add_scalar("reward/mean",       mean_rew,    global_iter)
+            tb_writer.add_scalar("episode/len_mean",  ep_len,      global_iter)
+            tb_writer.add_scalar("train/total_steps", total_steps, global_iter)
 
             # 손실 + grad_norm 지표 (Ray 2.10+: learners 하위)
             policy_stats = result.get("learners", {}).get("shared_policy", {})
@@ -475,7 +649,7 @@ def main():
             ):
                 val = policy_stats.get(key)
                 if val is not None:
-                    tb_writer.add_scalar(tag, val, i)
+                    tb_writer.add_scalar(tag, val, global_iter)
 
             # 콜백이 등록한 커스텀 메트릭 (action_dist, phase_switches, teleported, max_queue)
             # new API stack: env_stats 하위에 평탄화되어 들어옴
@@ -489,23 +663,27 @@ def main():
                        custom.get(f"{k}_mean", custom.get(k))))
                 if val is not None and not (isinstance(val, float) and math.isnan(val)):
                     if k.startswith("action_"):
-                        tb_writer.add_scalar(f"policy/action_dist/{k.replace('_ratio','')}", val, i)
+                        tb_writer.add_scalar(f"policy/action_dist/{k.replace('_ratio','')}",
+                                             val, global_iter)
                     else:
-                        tb_writer.add_scalar(f"policy/{k}", val, i)
+                        tb_writer.add_scalar(f"policy/{k}", val, global_iter)
 
             # 시스템 지표 — 메모리 누수 / SUMO 좀비 프로세스 / iter time
-            tb_writer.add_scalar("system/process_rss_mb",     _process_rss_mb(),  i)
-            tb_writer.add_scalar("system/sumo_process_count", _sumo_process_count(), i)
-            tb_writer.add_scalar("system/iter_time_sec",      iter_time, i)
+            tb_writer.add_scalar("system/process_rss_mb",     _process_rss_mb(),     global_iter)
+            tb_writer.add_scalar("system/sumo_process_count", _sumo_process_count(), global_iter)
+            tb_writer.add_scalar("system/iter_time_sec",      iter_time,             global_iter)
 
             ep_str = f"{ep_len:.0f}" if not math.isnan(ep_len) else "nan"
-            print(f"Iter {i:4d}/{args.num_iters} | "
+            # resume 면 "global (local i/N)" 둘 다 표시 → 진행도 파악 + 절대 위치 둘 다 보임
+            iter_disp = (f"{global_iter:4d} (local {i:3d}/{args.num_iters})"
+                         if iter_offset else f"{i:4d}/{args.num_iters}")
+            print(f"Iter {iter_disp} | "
                   f"mean_reward={mean_rew:8.2f} | ep_len={ep_str} | "
                   f"steps={int(total_steps)} | "
                   f"rss={_process_rss_mb():.0f}MB | iter_t={iter_time:.1f}s")
 
-            # 메타데이터 진행도 갱신 (checkpoint 시 같이 저장)
-            train_meta["train_iter"]        = i
+            # 메타데이터 진행도 갱신 (checkpoint 시 같이 저장) — global_iter 로 기록
+            train_meta["train_iter"]        = global_iter
             train_meta["train_total_steps"] = int(total_steps)
 
             if i % args.checkpoint_freq == 0:
@@ -515,7 +693,9 @@ def main():
 
         final_ckpt = algo.save(str(out_path))
         _save_metadata()
-        print(f"\n학습 완료. 최종 checkpoint: {final_ckpt}")
+        print(f"\n학습 완료. 최종 iter={train_meta['train_iter']}, "
+              f"total_steps={train_meta['train_total_steps']}")
+        print(f"checkpoint: {final_ckpt}")
         print(f"메타데이터: {out_path}/train_metadata.json")
     finally:
         # 각 cleanup 을 독립적으로 try/except — 하나가 hang/실패해도 다음 진행

@@ -1,4 +1,4 @@
-# GreenWave
+# GreenWave 🌱
 
 > MAPPO 기반 다중 교차로 신호제어 강화학습 프레임워크  
 > Multi-Agent PPO · SUMO Traffic Simulator · RLlib · PettingZoo
@@ -68,11 +68,11 @@ CTDE Actor:  π_i( a_i | o_i )            ← 자기 obs만 (실행 시 동일)
 │                                                             │
 │  Simple MAPPO                CTDE-MAPPO (--ctde)            │
 │  ─────────────               ────────────────────           │
-│  o_i ──► Actor (π_i)         o_i ──────────► Actor (π_i)   │
-│       └► Critic (V_i)        [o_1‥o_N] ──► Critic (V)      │
+│  o_i ──► Actor (π_i)         o_i ──────────► Actor (π_i)    │
+│       └► Critic (V_i)        [o_1‥o_N] ──► Critic (V)       │
 │                                                             │
-│  Critic 입력: 자기 obs만      Critic 입력: 전체 교차로 obs   │
-│  교차로 간 인과 학습 어려움   Green Wave 협조 학습 가능      │
+│  Critic 입력: 자기 obs만       Critic 입력: 전체 교차로 obs        │
+│  교차로 간 인과 학습 어려움       Green Wave 협조 학습 가능           │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -234,7 +234,7 @@ python record_video_mappo.py --model models/MAPPO_sumo_N --map 2x2-brt
 # → videos/mappo_policy_rollout_N.mp4
 ```
 
-`--mode {continuous, short}`: 기본 `continuous` 는 매 sim sec 당 1 frame (~3,600 frame, 10fps 기본 → **약 6분** 영상, yellow 전환 자연스러움). `short` 는 env.step() 당 1 frame (~720 frame, 5fps 권장 → **약 2.4분** 영상).
+`--mode {continuous, short}`: 기본 `continuous` 는 매 sim sec 당 1 frame (~3,600 frame, 10fps 기본 → **약 2분** 영상, yellow 전환 자연스러움). `short` 는 env.step() 당 1 frame (~720 frame, 5fps 권장 → **약 40초** 영상).
 
 ---
 
