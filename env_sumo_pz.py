@@ -265,6 +265,27 @@ class SumoParallelEnv(ParallelEnv):
         """등록된 모든 step hook 제거 (재사용 시 cleanup)."""
         self._step_hooks.clear()
 
+    def live_metrics(self) -> dict:
+        """현재 시뮬레이션 시점의 실시간 집계 지표 스냅샷 (영상 오버레이용).
+
+        step hook 안에서 호출하면 프레임과 1:1 정렬된 시계열을 얻을 수 있다.
+        - co2_kg     : 에피소드 누적 CO2 배출 (kg, 단조 증가)
+        - avg_wait   : 완료 차량 평균 대기시간 (s) — 평가 avg_waiting_time 으로 수렴
+        - cur_wait   : 현재 도로 위 차량들의 누적 대기시간 총합 (s, 혼잡도 실시간 반영)
+        - throughput : 현재까지 통과 완료한 차량 수
+        - sim_step   : 현재 시뮬레이션 step
+        """
+        cw = self._completed_waiting
+        avg_wait = (sum(cw) / len(cw)) if cw else 0.0
+        cur_wait = sum(self._latest_waiting.values()) if self._latest_waiting else 0.0
+        return {
+            "co2_kg": self._episode_co2_sum / 1e6,
+            "avg_wait": avg_wait,
+            "cur_wait": cur_wait,
+            "throughput": int(self._throughput),
+            "sim_step": int(self.sim_step),
+        }
+
     # ------------------------------------------------------------------
     # PettingZoo 필수 인터페이스 — obs/act space 동적 결정
     # ------------------------------------------------------------------

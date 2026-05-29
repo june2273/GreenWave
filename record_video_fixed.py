@@ -88,6 +88,9 @@ def parse_args():
                         "continuous: 매 sim step 마다 1 frame (yellow phase 포착).")
     p.add_argument("--seed", type=int, default=777,
                    help="MAPPO/CTDE 비디오와 동일 seed 사용 권장 (같은 trip).")
+    p.add_argument("--dump-metrics", type=str, default=None,
+                   help="프레임별 실시간 지표 (co2_kg/avg_wait/cur_wait/throughput) 를 "
+                        "JSON 으로 저장. frames 와 1:1 정렬됨 (3-way 비교 영상 오버레이용).")
 
     # ── 환경 파라미터 (학습/평가 default 와 일치) ─────────────
     p.add_argument("--max-steps", type=int, default=1200)
@@ -169,9 +172,14 @@ def main():
     try:
         obs_dict, _ = env.reset(seed=args.seed)
         frames = [env.render()]
+        metrics = [env.live_metrics()] if args.dump_metrics else None
 
         if args.mode == "continuous":
-            env.add_step_hook(lambda sim_step: frames.append(env.render()))
+            def _capture(sim_step):
+                frames.append(env.render())
+                if metrics is not None:
+                    metrics.append(env.live_metrics())
+            env.add_step_hook(_capture)
 
         step_idx = 0
         last_info = {}
@@ -180,6 +188,8 @@ def main():
             obs_dict, _, _, _, info_dict = env.step(actions)
             if args.mode == "short":
                 frames.append(env.render())
+                if metrics is not None:
+                    metrics.append(env.live_metrics())
             if info_dict:
                 # 임의 agent info 보관 (env-wide 키만 사용)
                 last_info = next(iter(info_dict.values()))
@@ -198,6 +208,15 @@ def main():
     duration = len(frames) / max(1, args.fps)
     print(f"Saved video: {out_path}  ({len(frames)} frames @ {args.fps}fps, "
           f"~{duration:.1f}s, mode={args.mode}, baseline={args.baseline})")
+
+    if args.dump_metrics and metrics is not None:
+        import json
+        mpath = Path(args.dump_metrics)
+        mpath.parent.mkdir(parents=True, exist_ok=True)
+        with open(mpath, "w") as f:
+            json.dump({"fps": args.fps, "frames": len(frames), "samples": metrics}, f)
+        print(f"Saved metrics: {mpath}  ({len(metrics)} samples, "
+              f"frames={len(frames)} → {'aligned' if len(metrics)==len(frames) else 'MISALIGNED!'})")
 
     # 진단 정보 (info 키 일부 출력)
     if last_info:

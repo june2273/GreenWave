@@ -87,6 +87,9 @@ def parse_args():
     p.add_argument("--brt-weight", type=float, default=1.0,
                    help="env 에 전달할 BRT 가중치 (학습 시와 동일 권장). "
                         "영상 자체에는 영향 없음 (정책 추론만), reward 진단용.")
+    p.add_argument("--dump-metrics", type=str, default=None,
+                   help="프레임별 실시간 지표 (co2_kg/avg_wait/cur_wait/throughput) 를 "
+                        "JSON 으로 저장. frames 와 1:1 정렬됨 (3-way 비교 영상 오버레이용).")
     p.add_argument("--sample", action="store_true",
                    help="argmax 대신 Categorical sampling 으로 행동 선택 "
                         "(train 과 동일, 확률 mass 그대로 반영). "
@@ -138,12 +141,17 @@ def main():
     try:
         obs_dict, _ = env.reset(seed=args.seed)
         frames = [env.render()]  # 초기 상태 프레임 포함
+        metrics = [env.live_metrics()] if args.dump_metrics else None
 
         # continuous 모드: env._simulate_seconds 가 매 sim step 후 호출하는 hook 등록
         # → env.step() 한 번에 (yellow_time + delta_time) sim step 동안 매초 frame 캡쳐
         # → yellow phase, 큐 누적/감소, 신호 전환이 모두 자연스러운 흐름으로 보임
         if args.mode == "continuous":
-            env.add_step_hook(lambda sim_step: frames.append(env.render()))
+            def _capture(sim_step):
+                frames.append(env.render())
+                if metrics is not None:
+                    metrics.append(env.live_metrics())
+            env.add_step_hook(_capture)
 
         def _select_action(logits):
             """args.sample=True: Categorical sampling (train 동일 분포).
@@ -166,6 +174,8 @@ def main():
             # short 모드만 env.step() 후 명시적 frame 추가 (continuous 는 hook 이 담당)
             if args.mode == "short":
                 frames.append(env.render())
+                if metrics is not None:
+                    metrics.append(env.live_metrics())
     finally:
         # 각 cleanup 독립 실행 — Ray 2.10+ ray.shutdown() hang 회피
         for cleanup_fn, name in (
@@ -184,6 +194,15 @@ def main():
     duration = len(frames) / max(1, args.fps)
     print(f"Saved video: {out_path}  ({len(frames)} frames @ {args.fps}fps, "
           f"~{duration:.1f}s, mode={args.mode})")
+
+    if args.dump_metrics and metrics is not None:
+        import json
+        mpath = Path(args.dump_metrics)
+        mpath.parent.mkdir(parents=True, exist_ok=True)
+        with open(mpath, "w") as f:
+            json.dump({"fps": args.fps, "frames": len(frames), "samples": metrics}, f)
+        print(f"Saved metrics: {mpath}  ({len(metrics)} samples, "
+              f"frames={len(frames)} → {'aligned' if len(metrics)==len(frames) else 'MISALIGNED!'})")
 
 
 if __name__ == "__main__":
