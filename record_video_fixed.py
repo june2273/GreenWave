@@ -99,6 +99,9 @@ def parse_args():
     p.add_argument("--yellow-time", type=int, default=3)
     p.add_argument("--brt-weight", type=float, default=1.0,
                    help="env 에 전달할 BRT 가중치 (영상 자체에는 영향 없음, info 진단용).")
+    p.add_argument("--time-to-teleport", type=int, default=300,
+                   help="SUMO 텔레포트 임계 (초). MAPPO/CTDE 평가·영상과 동일 값 사용 "
+                        "(공정 비교, 300=기본, -1=비활성).")
 
     # ── 시나리오 ────────────────────────────────────────────────
     p.add_argument("--map", type=str, default="2x2-brt", choices=MAP_CHOICES,
@@ -163,6 +166,7 @@ def main():
         tls_ids=tls_ids_effective,
         reward_mode="diff-waiting-time",
         brt_weight=args.brt_weight,
+        time_to_teleport=args.time_to_teleport,
     )
     if sumo_cfg_effective:
         env_kwargs["sumo_cfg"] = sumo_cfg_effective

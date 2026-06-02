@@ -75,6 +75,7 @@ class SumoParallelEnv(ParallelEnv):
         ctde_shared_reward: bool = True,
         switch_penalty: float = 0.45,
         brt_weight: float = 1.0,
+        time_to_teleport: int = 300,
     ):
         self.base_dir = Path(__file__).resolve().parent
         self.sumo_data_dir = self.base_dir / "sumo_data"
@@ -115,6 +116,17 @@ class SumoParallelEnv(ParallelEnv):
         # 1.5~3.0 권장; BRT 시나리오(2x2-brt, 3x2-brt)에서만 의미.
         # 평가 metric (avg_wait_brt/car, avg_speed_brt/car) 는 brt_weight 와 무관하게 항상 기록.
         self.brt_weight = float(brt_weight)
+
+        # SUMO 텔레포트 임계 (초). 차량이 정체에서 이 시간 이상 갇히면 SUMO가
+        # 정체 너머로 순간이동시켜 grid lock 을 자가 회복 (deadlock 안전밸브).
+        #   300 (default) = SUMO 기본값. deadlock 만 풀고 정상 대기는 건드리지 않음.
+        #   -1            = 텔레포트 완전 비활성 (과포화 시 영구 grid lock → 보상
+        #                   신호 소멸 → 학습 불가). 이전 동작.
+        # 과포화(LOS D+) 시나리오 학습에는 유한값 필수. 단 너무 짧으면(<120) 정상
+        # 대기 차량까지 순간이동시켜 지표가 과대평가됨. 평가 시 info["teleported"]≈0
+        # 을 확인해 결과가 텔레포트 인공물이 아님을 검증할 것.
+        # 공정 비교를 위해 MAPPO·CTDE·Fixed-Time 모두 동일 값 사용 (env 공유).
+        self.time_to_teleport = int(time_to_teleport)
 
         # SUMO TLS id → PettingZoo agent id 매핑
         self._tls_ids: List[str] = tls_ids if tls_ids is not None else ["C"]
@@ -554,7 +566,7 @@ class SumoParallelEnv(ParallelEnv):
         cmd = [
             binary, "-c", str(self.sumo_cfg),
             "--no-warnings", "true",
-            "--time-to-teleport", "-1",
+            "--time-to-teleport", str(self.time_to_teleport),
             "--seed", str(0 if seed is None else seed),
         ]
         traci.start(cmd, label=self._conn_label)

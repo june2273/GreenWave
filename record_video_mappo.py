@@ -87,6 +87,9 @@ def parse_args():
     p.add_argument("--brt-weight", type=float, default=1.0,
                    help="env 에 전달할 BRT 가중치 (학습 시와 동일 권장). "
                         "영상 자체에는 영향 없음 (정책 추론만), reward 진단용.")
+    p.add_argument("--time-to-teleport", type=int, default=300,
+                   help="SUMO 텔레포트 임계 (초). 학습·평가와 동일 값 사용 권장 "
+                        "(300=기본, -1=비활성). 영상이 eval 과 같은 거동을 묘사하도록 동기화.")
     p.add_argument("--dump-metrics", type=str, default=None,
                    help="프레임별 실시간 지표 (co2_kg/avg_wait/cur_wait/throughput) 를 "
                         "JSON 으로 저장. frames 와 1:1 정렬됨 (3-way 비교 영상 오버레이용).")
@@ -133,6 +136,7 @@ def main():
         tls_ids=tls_ids_effective,
         reward_mode=args.reward_mode,
         brt_weight=args.brt_weight,
+        time_to_teleport=args.time_to_teleport,
     )
     if sumo_cfg_effective:
         env_kwargs["sumo_cfg"] = sumo_cfg_effective

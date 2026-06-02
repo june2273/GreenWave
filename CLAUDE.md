@@ -6,6 +6,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 GreenWave is a reinforcement learning project for traffic signal control using MAPPO (Multi-Agent PPO). It uses SUMO (Simulation of Urban MObility) as the traffic simulator, PettingZoo as the multi-agent environment interface, and RLlib for the MAPPO algorithm. Scenarios are selected via `--map` (single / 2x2 / 2x2-brt / 3x2 / 3x2-brt); each preset auto-resolves `sumo_cfg` and default `tls_ids`.
 
+**출처/Attribution**: 환경(Environment) 골격은 [SUMO-RL](https://github.com/LucasAlegre/sumo-rl) v1.4.5 (Lucas N. Alegre)에서 채택 — 액션 스킴(`Discrete(num_green)` + yellow 자동삽입), 관측 `[phase_one_hot, min_green, density, queue]`, `diff-waiting-time` 보상, 2x2grid net(`2x2.net.xml`, 직좌 4-phase ring & barrier). 그 위의 **MAPPO·CTDE(RLlib 자체 구현), BRT 가중 보상, switch penalty, BRT 14-link TLS·obs 패딩, 텔레포트 안전밸브, 세종 실측 시나리오는 독자 확장** (SUMO-RL 에는 MAPPO 구현 없음; 보상 스케일도 `/100`→`/10` 수정). 후보였던 thisisjonchen/mschrader15/maxbrenner-ai/Navtegh 레포는 코드·문서·설정 어디에도 흔적 없음 (참조처 아님).
+
 ## Prerequisites
 
 **System binaries** (macOS via Homebrew):
@@ -144,8 +146,9 @@ RLlib PPO (shared policy)  ←({agent: obs/rew})←  SumoParallelEnv  ←──�
 - `vf_clip_param=1000.0` (current) — matches diff-waiting-time reward scale (~thousands); too small causes VF loss signal loss.
 - `switch_penalty=0.45` (current) — reward 페널티 per phase switch. `yellow_time=3s × 1대/s 손실 ≈ 0.45`. yellow_seconds → throughput 0 으로 인한 oscillation 학습 차단. 0 으로 끄려면 `--switch-penalty 0`. yellow_time=2s 기준 이전 체크포인트 재사용 시 `--switch-penalty 0.3` 명시.
 - `yellow_time=3` (current) — XML TLS 정의(`duration="3"`) 및 세종시 실제 신호(3초)와 일치. Python 환경이 직접 `_simulate_seconds(yellow_time)` 호출 (XML duration은 무시됨).
+- `time_to_teleport=300` (current default) — 차량이 정체에 이 시간 이상 갇히면 SUMO가 정체 너머로 순간이동시켜 grid lock 을 자가 회복 (deadlock 안전밸브). 과거 하드코딩 `-1`(비활성)은 과포화(LOS D+) 시 영구 grid lock → diff-waiting-time 의 행동 의존 신호 소멸 → 학습 불가의 직접 원인이었음. 이제 `env_sumo_pz.py` 의 SUMO 시작 명령은 `self.time_to_teleport` 사용, `--time-to-teleport` CLI 로 override (train/evaluate/record 전부). 너무 짧으면(<120) 정상 대기 차량까지 순간이동 → 지표 과대평가. 평가 시 info `teleported`≈0 확인 = 결과가 텔레포트 인공물이 아님을 검증. 공정 비교 위해 MAPPO·CTDE·Fixed-Time 동일 값(env_kwargs 공유 + evaluate 는 `train_metadata.json` 자동 로드). 옛 거동 재현은 `--time-to-teleport -1`.
 - BRT 시나리오에서 BRT 차량은 `vClass="bus"`로 lane 2 진입 / 일반 차량은 `passenger`로 lane 2 진입 차단. routes XML에서 `departLane="2"`로 BRT 강제. 일반 차량의 우회전·좌회전은 BRT corridor edge 진입 시 lane 0/1로 들어가 BRT lane과 충돌 없음.
-- Diagnostic info dict 키: `vehicles_loaded` / `vehicles_departed` / `vehicles_lost_insert` / `pending_insert_peak` / `pending_insert_final` (insertion-failure 가시화 — `--time-to-teleport -1` 환경에서 silent vehicle drop 진단), `yellow_seconds` / `yellow_ratio` (oscillation 진단), `phase_switches` / `max_queue` / `action_counts` (mode collapse 진단).
+- Diagnostic info dict 키: `vehicles_loaded` / `vehicles_departed` / `vehicles_lost_insert` / `pending_insert_peak` / `pending_insert_final` (insertion-failure 가시화 — `--time-to-teleport -1`(텔레포트 비활성) 환경에서 silent vehicle drop 진단; 기본값 300 에서는 deadlock 자가 회복), `yellow_seconds` / `yellow_ratio` (oscillation 진단), `phase_switches` / `max_queue` / `action_counts` (mode collapse 진단).
 
 ## PPO Hyperparameters (Current)
 
@@ -163,6 +166,7 @@ RLlib PPO (shared policy)  ←({agent: obs/rew})←  SumoParallelEnv  ←──�
 | `vf_clip_param` | `1000.0` | diff-waiting-time reward scale(~수천)에 맞춤. 작으면 VF 학습신호 99% clip 소실 |
 | `yellow_time` | `3` | XML TLS 정의 및 세종시 실제 신호(3초)와 일치. 이전 값 2초로 학습된 모델은 `--yellow-time 2` 명시 |
 | `switch_penalty` | `0.45` | yellow 3초 × 1대/초 손실. yellow_time=2 기준 이전 모델 재사용 시 0.3 명시 |
+| `time_to_teleport` | `300` | SUMO 텔레포트 임계(초). deadlock 안전밸브. `-1`=비활성(과포화 시 영구 grid lock → 학습 불가). `--time-to-teleport` CLI. evaluate 는 metadata 자동 로드 |
 
 ## Troubleshooting
 
@@ -172,7 +176,7 @@ RLlib PPO (shared policy)  ←({agent: obs/rew})←  SumoParallelEnv  ←──�
 | `loss/value` 수렴 안 함 | `vf_clip_param` 너무 작음 (신호 clip 소실) | `vf_clip_param` ↑ (현재 1000) |
 | `phase_switches` > 1200 (4 agent 기준) | 과도 switching | `--switch-penalty` ↑, `--min-green` ↑ |
 | `policy/yellow_ratio` > 0.15 | phase oscillation (매 step switching) | `--switch-penalty` ↑, `entropy_coeff` ↓ |
-| `teleported` > 0 | grid lock (정체 한계 초과) | `--traffic` 낮추기, network 수정 |
+| `teleported` ≫ 0 | grid lock (정체 한계 초과, 안전밸브 빈발) | `--traffic` 낮추기, network 수정. 소수(≈0)는 정상 deadlock 회복 |
 | `vehicles_lost_insert` 급증 | dense traffic lane 포화 (silent drop) | 차량 수요 완화, 좌회전 phase 학습 확인 |
 | `process_rss_mb` 우상향 | 메모리 누수 | env close() 누락 확인 |
 | `train_total_steps=0` (CTDE) | Dict obs → worker connector silent drop | flat Box 평탄화 확인 (`obs_space.shape=(D+D×N,)`). 본 repo는 이미 적용됨 |
@@ -193,6 +197,6 @@ RLlib PPO (shared policy)  ←({agent: obs/rew})←  SumoParallelEnv  ←──�
 
 Python env 호출 후 (`env.reset` + 임의 action 20-step):
 - `obs_dim`: single=13, 2x2/3x2=21, 2x2-brt/3x2-brt=25
-- `yellow_time=3`, `switch_penalty=0.45` (env 기본값, 학습 CLI default 와 일치)
+- `yellow_time=3`, `switch_penalty=0.45`, `time_to_teleport=300` (env 기본값, 학습 CLI default 와 일치)
 
 `env_sumo_pz.py` 의 `SumoParallelEnv.__init__` defaults 는 `train_mappo.py` CLI defaults 와 항상 동기화. 직접 객체 생성 시 (`SumoParallelEnv(...)`) 에도 학습 환경과 동일 reward 식 적용됨.

@@ -105,6 +105,12 @@ def parse_args():
     p.add_argument("--reward-mode", type=str, default="diff-waiting-time",
                    choices=["diff-waiting-time"],
                    help="보상 모드. 현재 diff-waiting-time 단일 모드만 지원.")
+    p.add_argument("--time-to-teleport", type=int, default=None,
+                   help="SUMO 텔레포트 임계 (초). 미지정 시 model 의 train_metadata.json "
+                        "값 자동 로드 (없으면 300). 명시 시 metadata 보다 우선. "
+                        "공정 비교를 위해 MAPPO·CTDE·Fixed-Time 에 동일 적용됨. "
+                        "결과의 teleport 열이 0 에 가까울수록 텔레포트 인공물이 아닌 "
+                        "실제 신호제어 효과임을 검증.")
     p.add_argument("--sumo-cfg", type=str, default=None,
                    help="SUMO 설정 파일 경로 (학습 시와 동일하게 지정)")
     p.add_argument("--traffic", type=str, default="default",
@@ -259,6 +265,15 @@ def main():
         brt_weight_effective = float(train_meta.get("brt_weight", 1.0))
     print(f"[brt_weight={brt_weight_effective}]")
 
+    # 텔레포트 임계 결정: CLI 명시값 > train_metadata > default(300)
+    # 학습 시와 동일 환경에서 평가해야 하고, 세 베이스라인(MAPPO·CTDE·Fixed-Time)에
+    # 동일 값을 적용해야 공정 비교가 됨 (env_kwargs 공유로 자동 보장).
+    if args.time_to_teleport is not None:
+        ttt_effective = int(args.time_to_teleport)
+    else:
+        ttt_effective = int(train_meta.get("time_to_teleport", 300))
+    print(f"[time_to_teleport={ttt_effective}]")
+
     env_kwargs = dict(
         use_gui=False,
         delta_time=args.delta_time,
@@ -268,6 +283,7 @@ def main():
         tls_ids=tls_ids_effective,
         reward_mode=args.reward_mode,
         brt_weight=brt_weight_effective,
+        time_to_teleport=ttt_effective,
     )
     if sumo_cfg_effective:
         env_kwargs["sumo_cfg"] = sumo_cfg_effective
@@ -527,6 +543,7 @@ def main():
         "vf_clip_param":     train_meta.get("vf_clip_param", ""),
         "switch_penalty":    train_meta.get("switch_penalty", ""),
         "brt_weight":        brt_weight_effective,
+        "time_to_teleport":  ttt_effective,
         "min_green":         train_meta.get("min_green", args.min_green),
         "map":               train_meta.get("map", args.map),
         "train_seed":        train_meta.get("seed", ""),

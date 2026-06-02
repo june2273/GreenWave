@@ -191,6 +191,7 @@ yellow_time=2 로 학습된 이전 체크포인트 재사용 시 `--switch-penal
 | `--switch-penalty` | 0.45 | phase switch 마다 reward 페널티. yellow 3초 손실 기준 |
 | `--yellow-time` | 3 | yellow phase 길이(초). 세종 실제 신호 3초와 일치 |
 | `--min-green` | 13 | 최소 green 유지 시간(초). oscillation 억제 |
+| `--time-to-teleport` | 300 | SUMO 텔레포트 임계(초). 정체에 갇힌 차량을 정체 너머로 이동시켜 grid lock 자가 회복(deadlock 안전밸브). `-1` = 비활성(과포화 시 보상신호 소멸 → 학습 불가). 과포화 학습엔 유한값 필수 |
 | `--seed` | 42 | 재현성용 시드 |
 
 체크포인트는 `models/MAPPO_sumo_N/` (CTDE: `models/MAPPO_CTDE_sumo_N/`)에 자동 버전 저장.
@@ -342,7 +343,11 @@ GreenWave/
 
 ---
 
-## Citation
+## Citation & Attribution
+
+> **출처 범위 (오해 방지)** — 본 프로젝트는 **환경(Environment) 골격을 [SUMO-RL](https://github.com/LucasAlegre/sumo-rl) v1.4.5 (Lucas N. Alegre)에서 채택**했습니다. 구체적으로 ⓐ 액션 스킴(green phase 자동 감지 `Discrete(num_green)` + yellow 자동 삽입), ⓑ 관측 설계 `[phase_one_hot, min_green, density, queue]`, ⓒ `diff-waiting-time` 보상, ⓓ 2x2grid 네트워크(`2x2.net.xml`, 직좌 4-phase ring & barrier)가 이에 해당합니다.
+>
+> 그 위의 **MAPPO·CTDE 알고리즘(RLlib 기반 자체 구현), BRT 가중 보상(`brt-weight`), switch penalty, BRT 회랑 14-link TLS·관측 패딩, 텔레포트 안전밸브, 세종시 실측 기반 시나리오(2x2-brt / 3x2-brt)는 본 프로젝트의 독자 확장**입니다. (SUMO-RL 라이브러리 자체에는 MAPPO 구현이 없습니다.) 보상 스케일도 SUMO-RL(`/100`)과 달리 `/10`으로 조정했습니다.
 
 ```bibtex
 @misc{kafa46,

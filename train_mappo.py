@@ -324,6 +324,13 @@ def parse_args():
                         "reward_mode='diff-waiting-time' 에서만 reward 에 반영됨. "
                         "평가 metric (avg_wait_brt/car, avg_speed_brt/car) 분리는 "
                         "이 값과 무관하게 항상 기록.")
+    p.add_argument("--time-to-teleport", type=int, default=300,
+                   help="SUMO 텔레포트 임계 (초). 차량이 정체에 이 시간 이상 갇히면 "
+                        "정체 너머로 순간이동시켜 grid lock 자가 회복 (deadlock 안전밸브). "
+                        "300 = SUMO 기본값(권장). -1 = 비활성(과포화 시 영구 grid lock → "
+                        "보상신호 소멸 → 학습 불가). 과포화(LOS D+) 학습엔 유한값 필수. "
+                        "너무 짧으면(<120) 정상 대기 차량까지 순간이동 → 지표 과대평가. "
+                        "MAPPO·CTDE·Fixed-Time 공정비교 위해 evaluate 시 동일 값 사용.")
     p.add_argument("--sumo-cfg", type=str, default=None,
                    help="SUMO 설정 파일 경로 (미지정 시 기본 단일교차로 사용)")
     p.add_argument("--traffic", type=str, default="default",
@@ -407,6 +414,7 @@ def main():
         "ctde_shared_reward": (args.ctde_reward == "shared"),
         "switch_penalty": args.switch_penalty,
         "brt_weight": args.brt_weight,
+        "time_to_teleport": args.time_to_teleport,
     }
     if sumo_cfg_effective:
         env_config["sumo_cfg"] = sumo_cfg_effective
@@ -578,6 +586,7 @@ def main():
         "traffic":      args.traffic,
         "switch_penalty": args.switch_penalty,
         "brt_weight":   args.brt_weight,
+        "time_to_teleport": args.time_to_teleport,
         "ctde_mode":    bool(args.ctde),
         "ctde_reward":  args.ctde_reward if args.ctde else None,
         # resume 출처 추적
