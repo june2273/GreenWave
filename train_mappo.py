@@ -91,6 +91,23 @@ def _sumo_process_count() -> int:
     return count
 
 
+def _dig_metric(d, key):
+    """RLlib result dict(중첩 구조)에서 key 를 재귀적으로 찾아 첫 값을 반환.
+
+    새 API 스택은 타이머가 result["timers"][<key>] 또는 하위에 중첩되는데
+    버전마다 경로가 달라 정확 경로 하드코딩 대신 key 명으로 탐색.
+    숫자(int/float)인 첫 매치만 반환, 없으면 None.
+    """
+    if isinstance(d, dict):
+        if key in d and isinstance(d[key], (int, float)):
+            return d[key]
+        for v in d.values():
+            r = _dig_metric(v, key)
+            if r is not None:
+                return r
+    return None
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # 커스텀 콜백 — env info에 노출된 진단 지표를 RLlib 메트릭으로 끌어올림
 # ──────────────────────────────────────────────────────────────────────────────
@@ -363,8 +380,15 @@ def parse_args():
                    help="learning rate override. resume 시 metadata 값보다 우선. "
                         "미명시 시 metadata 값 (없으면 1e-4).")
     p.add_argument("--entropy-coeff", type=float, default=None,
-                   help="entropy coefficient override. resume 시 metadata 값보다 우선. "
+                   help="entropy coefficient override (고정값). resume 시 metadata 값보다 우선. "
                         "미명시 시 metadata 값 (없으면 0.03).")
+    p.add_argument("--entropy-schedule", type=float, nargs=2, default=None,
+                   metavar=("START", "END"),
+                   help="entropy coefficient 선형 스케줄 [START→END] (새 API 스택, "
+                        "entropy_coeff=[[step,val],...] 형식). 예: --entropy-schedule 0.03 0.005 "
+                        "→ 학습 초반 0.03(탐색)에서 후반 0.005(sharpening)로 선형 감소. "
+                        "전체 학습량의 75%% 지점에서 END 도달 후 유지. --entropy-coeff(고정)보다 우선. "
+                        "MAPPO·CTDE 동일 적용(hparams 공유).")
     p.add_argument("--train-batch-size", type=int, default=None,
                    help="PPO 배치 크기 (스텝 수). "
                         "미명시 시 metadata 값 (없으면 8000). "
@@ -479,6 +503,18 @@ def main():
         entropy_coeff=_pick(args.entropy_coeff, "entropy_coeff", 0.03),
         vf_clip_param=1000.0,     # A3: 500 → 10 → 1000 (VF signal 복원)
     )
+    # entropy 스케줄: 지정 시 고정 entropy_coeff 를 [[step,val],...] 선형 스케줄로 대체.
+    # 약한 보상신호가 살아난 뒤 정책을 sharpening 하도록 초반 탐색→후반 수렴 유도.
+    # 새 API 스택은 entropy_coeff 자체에 schedule 리스트를 받음 (entropy_coeff_schedule 아님).
+    # timestep 은 학습 누적 env step 기준 → train_batch_size × num_iters 로 horizon 산정,
+    # 75% 지점에서 END 도달 후 유지. hparams 공유라 MAPPO·CTDE 에 동일 적용됨.
+    if args.entropy_schedule is not None:
+        ent_start, ent_end = float(args.entropy_schedule[0]), float(args.entropy_schedule[1])
+        total_steps = int(args.num_iters) * int(hparams["train_batch_size"])
+        knee = max(1, int(total_steps * 0.75))
+        hparams["entropy_coeff"] = [[0, ent_start], [knee, ent_end]]
+        print(f"[entropy schedule] {ent_start} → {ent_end} over ~{knee:,} steps (75% of run), "
+              f"then hold {ent_end}")
     if args.resume_from:
         print(f"[resume] hparams: lr={hparams['lr']} entropy_coeff={hparams['entropy_coeff']} "
               f"(CLI override 시 그것이 우선)")
@@ -535,8 +571,44 @@ def main():
     # algo 빌드: resume 면 from_checkpoint, 아니면 새로 빌드.
     # weights_only_actual 은 fallback 여부 추적용 (steps_offset 계산에 사용).
     if args.resume_from:
+        # ── config 변경 감지 → weights-only 자동 강제 ─────────────────────────
+        # Algorithm.from_checkpoint(path) 는 체크포인트에 저장된 config(env_config·
+        # hparams 포함)를 복원하며 여기서 새로 만든 config 를 통째로 무시함. 따라서
+        # 시나리오(map/traffic/sumo_cfg)나 하이퍼파라미터를 바꾸는 resume 은 그 변경이
+        # silent 하게 무시됨 (예: --traffic high 가 적용 안 돼 기본 demand 로 학습됨).
+        # 변경 감지 시 weights-only(새 config 로 algo 빌드 + 가중치만 주입)로 강제 전환.
+        def _norm_path(p):
+            try:
+                return str(Path(p).resolve()) if p else ""
+            except Exception:
+                return str(p or "")
+        prev_cfg = resume_meta.get("sumo_cfg")
+        env_changed = (
+            (bool(prev_cfg) and bool(sumo_cfg_effective)
+             and _norm_path(prev_cfg) != _norm_path(sumo_cfg_effective))
+            or (resume_meta.get("traffic") is not None
+                and resume_meta.get("traffic") != args.traffic)
+            or (resume_meta.get("map") is not None
+                and resume_meta.get("map") != args.map)
+        )
+        hparam_overridden = any(v is not None for v in (
+            args.lr, args.entropy_coeff, args.entropy_schedule, args.train_batch_size))
+        force_weights_only = env_changed or hparam_overridden
+        if force_weights_only and not args.resume_weights_only:
+            reasons = []
+            if env_changed:
+                reasons.append(
+                    f"시나리오 변경(map/traffic: "
+                    f"{resume_meta.get('map')}/{resume_meta.get('traffic')} → "
+                    f"{args.map}/{args.traffic})")
+            if hparam_overridden:
+                reasons.append("하이퍼파라미터 CLI override")
+            print("[resume][WARN] " + " + ".join(reasons) + " 감지.")
+            print("[resume][WARN] from_checkpoint 는 체크포인트의 저장된 config 를 복원해 "
+                  "이 변경을 무시합니다 → weights-only 로 자동 전환 "
+                  "(새 config 적용; optimizer state 는 새로 시작).")
         algo, weights_only_actual = _restore_algo(
-            config, resume_path_abs, args.resume_weights_only
+            config, resume_path_abs, args.resume_weights_only or force_weights_only
         )
     else:
         algo = config.build_algo()
@@ -681,6 +753,26 @@ def main():
             tb_writer.add_scalar("system/process_rss_mb",     _process_rss_mb(),     global_iter)
             tb_writer.add_scalar("system/sumo_process_count", _sumo_process_count(), global_iter)
             tb_writer.add_scalar("system/iter_time_sec",      iter_time,             global_iter)
+
+            # ── sample/learn 타이머 — num_workers 최적값 판정용 ────────────────
+            # sample_time ≫ learn_time → worker 늘리면 이득 / sample_time < learn_time
+            # → 샘플링이 이미 빨라 worker 늘려도 무의미(Amdahl 한계).
+            # 새 API 스택은 result["timers"] 하위에 초 단위로 기록 (중첩 경로 버전별
+            # 상이 → _dig_metric 으로 key 탐색).
+            sample_t = _dig_metric(result, "env_runner_sampling_timer")
+            learn_t  = _dig_metric(result, "learner_update_timer")
+            if sample_t is not None:
+                tb_writer.add_scalar("system/sample_time_sec", sample_t, global_iter)
+            if learn_t is not None:
+                tb_writer.add_scalar("system/learn_time_sec", learn_t, global_iter)
+            if sample_t is not None and learn_t and learn_t > 0:
+                # >1 이면 샘플링이 병목(worker↑ 이득), <1 이면 학습이 병목(worker↑ 무의미)
+                tb_writer.add_scalar("system/sample_learn_ratio", sample_t / learn_t, global_iter)
+            # 샘플링 throughput(steps/s) — RLlib 키가 새 스택엔 없어 batch/sample_t 로 근사.
+            # worker 수를 늘릴수록 이 값이 커지다 평탄해지는 지점이 최적.
+            if sample_t and sample_t > 0:
+                tb_writer.add_scalar("system/env_steps_per_sec",
+                                     hparams["train_batch_size"] / sample_t, global_iter)
 
             ep_str = f"{ep_len:.0f}" if not math.isnan(ep_len) else "nan"
             # resume 면 "global (local i/N)" 둘 다 표시 → 진행도 파악 + 절대 위치 둘 다 보임

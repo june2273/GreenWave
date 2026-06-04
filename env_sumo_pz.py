@@ -250,6 +250,10 @@ class SumoParallelEnv(ParallelEnv):
 
         # 네트워크 시각화 렌더러
         self._renderer = SumoRenderer(self.sumo_cfg)
+        # 렌더 타이틀 첫 줄에 표시할 모델 식별 라벨 (record_video 스크립트가 설정).
+        # 예: "MAPPO · iter 185" / "CTDE · iter 130" / "FixedTime(Sejong)".
+        # None 이면 Step 줄만 표시 (학습/평가에는 영향 없음).
+        self.render_label: Optional[str] = None
 
         # 매 sim step 직후 호출될 콜백 리스트 (frame 캡쳐 등 외부 hook)
         # 학습/평가에는 영향 없음 (등록 안 하면 no-op). record_video 에서 사용.
@@ -1044,6 +1048,7 @@ class SumoParallelEnv(ParallelEnv):
             # 큐가 아니게 되어 추가됨 (SumoRenderer 옵션 B 큐 막대 정확화)
             queue_per_lane=self._last_queue_per_lane,
             lane_ids=self._per_agent_lanes,
+            title_label=self.render_label,
         )
 
     def close(self):

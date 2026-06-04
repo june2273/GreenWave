@@ -108,7 +108,7 @@ RLlib PPO (shared policy)  ←({agent: obs/rew})←  SumoParallelEnv  ←──�
 - Reward: `diff-waiting-time` 단일 모드 — `(prev − current) / 10`. `switch_penalty=0.45` (phase switching 시 reward -= 0.45, oscillation 억제, yellow_time=3s 기준). queue/pressure 모드는 cleanup 으로 제거됨.
 - `--brt-weight w` (default 1.0, BRT 시나리오 전용): 보상함수에서 BRT(vClass=bus) 대기시간에 부여하는 중요도 계수. `w=1.0` = 일반 차량과 동등 취급 (baseline, lane.getWaitingTime 합과 수학적으로 동일). `w>1` → BRT 대기시간 감소를 더 크게 보상해 정책이 BRT 우선 신호를 학습하도록 유도. 실제 대기시간을 늘리는 게 아닌 보상 신호 비중 조정 (`current_wait = Σ_veh w_veh × accum_wait / 10`). 권장: `2.0~3.0`. info dict 의 `avg_wait_brt/car`, `brt_seen`, `car_seen` 는 w 와 무관하게 항상 기록.
 
-**`train_mappo.py`** — Builds a `PPOConfig` with shared policy across all agents, runs the training loop, writes TensorBoard scalars to `results/tb_mappo/<run_name>/`, and saves RLlib checkpoints (directory format) to `models/MAPPO_sumo_N/`. `--ctde` flag enables centralized critic (CTDE-MAPPO), saving to `models/MAPPO_CTDE_sumo_N/`. A `train_metadata.json` is saved alongside each checkpoint with all hyperparameters and map settings.
+**`train_mappo.py`** — Builds a `PPOConfig` with shared policy across all agents, runs the training loop, writes TensorBoard scalars to `results/tb_mappo/<run_name>/`, and saves RLlib checkpoints (directory format) to `models/MAPPO_sumo_N/`. `--ctde` flag enables centralized critic (CTDE-MAPPO), saving to `models/MAPPO_CTDE_sumo_N/`. A `train_metadata.json` is saved alongside each checkpoint with all hyperparameters and map settings. **MAPPO·CTDE 하이퍼파라미터 동등성**: `--ctde` 는 `.rl_module(...)` 로 RLModule 만 `CentralizedCriticPPOModule` 로 교체할 뿐 `.training(**hparams)`(lr·entropy_coeff·train_batch_size·clip·vf_clip 등)는 두 경로가 동일하게 적용 → 같은 CLI flag(+`--ctde`)로 학습하면 공정 비교 보장 (차이는 centralized critic 뿐).
 
 **`evaluate_mappo.py`** — 3-way comparison: MAPPO vs CTDE-MAPPO (optional) vs Fixed-time. Results saved to `results/eval_metrics_mappo_N.csv` with metadata prefix columns for model traceability. `--baseline` 선택: `symmetric` (균등 N-step 사이클, 기본) / `sejong` (공공데이터포털·세담터 실측 자료 기반 per-TLS 비대칭 신호 — `SEJONG_PER_TLS_PHASE_SECONDS` dict 의 6 TLS 매핑).
 
@@ -162,7 +162,7 @@ RLlib PPO (shared policy)  ←({agent: obs/rew})←  SumoParallelEnv  ←──�
 | `lambda_` | `0.95` | GAE λ |
 | `clip_param` | `0.2` | PPO clip ε |
 | `vf_loss_coeff` | `0.5` | — |
-| `entropy_coeff` | `0.03` | 좌회전 phase mode collapse 방지 (dense 시나리오 초기 음수 reward → collapse 억제) |
+| `entropy_coeff` | `0.03` | 좌회전 phase mode collapse 방지 (dense 시나리오 초기 음수 reward → collapse 억제). `--entropy-schedule START END` 로 선형 스케줄(예 `0.03 0.005`, 초반 탐색→후반 sharpening, 75% 지점에서 END 도달) 가능 — 새 API 스택은 `entropy_coeff=[[step,val],...]` 형식. `hparams` 공유라 MAPPO·CTDE 동일 적용 |
 | `vf_clip_param` | `1000.0` | diff-waiting-time reward scale(~수천)에 맞춤. 작으면 VF 학습신호 99% clip 소실 |
 | `yellow_time` | `3` | XML TLS 정의 및 세종시 실제 신호(3초)와 일치. 이전 값 2초로 학습된 모델은 `--yellow-time 2` 명시 |
 | `switch_penalty` | `0.45` | yellow 3초 × 1대/초 손실. yellow_time=2 기준 이전 모델 재사용 시 0.3 명시 |

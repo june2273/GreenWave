@@ -1,0 +1,51 @@
+{
+  "model_name": "MAPPO_sumo_5",
+  "model_path": "/Volumes/june2_07ssd/PycharmProjects/GreenWave/models/MAPPO_sumo_5",
+  "map": "3x2-brt",
+  "tls_ids": [
+    "1",
+    "2",
+    "3",
+    "4",
+    "5",
+    "6"
+  ],
+  "reward_mode": "diff-waiting-time",
+  "seed": 42,
+  "num_workers": 5,
+  "max_steps": 3600,
+  "delta_time": 5,
+  "min_green": 13,
+  "yellow_time": 3,
+  "sumo_cfg": "/Volumes/june2_07ssd/PycharmProjects/GreenWave/sumo_data/3x2_brt/3x2_brt.sumocfg",
+  "traffic": "default",
+  "switch_penalty": 0.45,
+  "brt_weight": 1.0,
+  "time_to_teleport": 300,
+  "ctde_mode": false,
+  "ctde_reward": null,
+  "resume_from": "models/MAPPO_sumo_5",
+  "resume_weights_only": false,
+  "resume_iter_offset": 50,
+  "train_iter": 130,
+  "train_total_steps": 1040000,
+  "lr": 0.0001,
+  "gamma": 0.99,
+  "train_batch_size": 8000,
+  "num_epochs": 6,
+  "minibatch_size": 128,
+  "lambda_": 0.95,
+  "clip_param": 0.2,
+  "vf_loss_coeff": 0.5,
+  "entropy_coeff": [
+    [
+      0,
+      0.03
+    ],
+    [
+      1800000,
+      0.005
+    ]
+  ],
+  "vf_clip_param": 1000.0
+}

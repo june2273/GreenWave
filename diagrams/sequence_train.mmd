@@ -1,0 +1,40 @@
+sequenceDiagram
+    actor User
+    participant train as train_mappo.py
+    participant probe as SumoParallelEnv (probe)
+    participant SUMO as SUMO / TraCI
+    participant ppo as RLlib PPOConfig
+    participant env as SumoParallelEnv (worker)
+    participant tb as TensorBoard
+
+    User->>train: python train_mappo.py --map 3x2-brt --ctde --traffic high
+
+    train->>probe: _probe_network_spec()
+    probe->>SUMO: traci.start() [UUID 라벨]
+    SUMO-->>probe: phase 구조·lane·용량 반환
+    probe->>SUMO: traci.close()
+    probe-->>train: obs_dim, num_green, num_lanes
+
+    train->>ppo: PPOConfig.build()<br/>(MultiRLModuleSpec → CentralizedCriticPPOModule)
+
+    loop iter = 1 … N
+        ppo->>env: sample_batch (num_workers × rollout)
+        env->>SUMO: traci.start()
+        SUMO-->>env: reset obs
+
+        loop episode (max_steps = 3600)
+            ppo->>env: step(actions)
+            env->>SUMO: setPhase / simulationStep × delta_time
+            SUMO-->>env: lane density, queue, waiting_time
+            env-->>ppo: obs, reward (diff-wait/10 − switch_penalty), done
+        end
+
+        env->>SUMO: traci.close()
+        ppo->>ppo: compute GAE (λ=0.95)<br/>PPO clip update (ε=0.2, 6 epochs)
+
+        train->>tb: writer.add_scalar(reward, loss, …)
+    end
+
+    train->>train: save checkpoint → models/MAPPO_CTDE_sumo_N/
+    train->>train: save train_metadata.json
+    train->>User: os._exit(0)

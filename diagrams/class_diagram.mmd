@@ -1,0 +1,136 @@
+classDiagram
+    direction TB
+
+    class ParallelEnv {
+        <<PettingZoo Abstract>>
+        +possible_agents : List~str~
+        +agents : List~str~
+        +reset() Dict
+        +step(actions) Tuple
+        +observe(agent) ndarray
+        +render() ndarray
+        +close()
+    }
+
+    class SumoParallelEnv {
+        +sumo_cfg : Path
+        +delta_time : int = 5
+        +yellow_time : int = 3
+        +min_green : int = 13
+        +max_steps : int = 3600
+        +reward_mode : str
+        +ctde_mode : bool
+        +switch_penalty : float = 0.45
+        +brt_weight : float = 1.0
+        +time_to_teleport : int = 300
+        +_tls_ids : List~str~
+        +_agent_to_tls : Dict
+        +_num_green : int
+        +_obs_dim : int
+        +_per_agent_lanes : Dict
+        +_per_agent_green_phases : Dict
+        +_lane_capacities : Dict
+        +conn : TraCI
+        +reset() Dict
+        +step(actions) Tuple
+        +render() ndarray
+        +close()
+        -_probe_network_spec() Dict
+        -_extract_phase_structure()
+        -_set_phase_locked()
+        -_simulate_seconds(secs)
+        -_compute_reward(agent) float
+        -_build_obs(agent) ndarray
+        -_maybe_build_network()
+    }
+
+    class SumoRenderer {
+        +FIG_SIZE : float = 10.0
+        +FIG_DPI : int = 110
+        +BG_COLOR : str
+        +BRT_LANE_CLR : str
+        +net_path : Path
+        +render(tls_states, queue_per_agent) ndarray
+        -_load_network()
+        -_draw_edges()
+        -_draw_tls_signals()
+        -_draw_queue_bars()
+    }
+
+    class DefaultPPOTorchRLModule {
+        <<RLlib Base>>
+        +setup()
+        +_forward(batch) Dict
+        +_forward_train(batch) Dict
+        +compute_values(batch) TensorType
+    }
+
+    class CentralizedCriticPPOModule {
+        +_local_dim : int
+        +pi_encoder : nn.Sequential
+        +vf_encoder : nn.Sequential
+        +pi : nn.Linear
+        +vf : nn.Linear
+        +setup()
+        +_forward(batch) Dict
+        +_forward_train(batch) Dict
+        +compute_values(batch) TensorType
+        +get_non_inference_attributes() List~str~
+        +get_inference_action_dist_cls() TorchCategorical
+    }
+
+    class MapPresets {
+        <<module>>
+        +MAP_CHOICES : List~str~
+        +MAP_PRESETS : Dict
+        +resolve_map_args(map_name, sumo_cfg_arg, tls_ids_arg, traffic) Tuple
+    }
+
+    class TrainScript {
+        <<train_mappo.py>>
+        +_make_env(config) ParallelPettingZooEnv
+        +_next_out_path(algo, model_dir) str
+        +_process_rss_mb() float
+        +main(args)
+    }
+
+    class EvaluateScript {
+        <<evaluate_mappo.py>>
+        +_load_rl_module(model_path) RLModule
+        +_run_mappo(env, module) Dict
+        +_run_fixed_time(env, baseline) Dict
+        +main(args)
+    }
+
+    class RecordVideoScript {
+        <<record_video_mappo.py>>
+        +_load_rl_module(model_path) RLModule
+        +record_continuous(env, module)
+        +record_short(env, module)
+        +main(args)
+    }
+
+    class RecordFixedScript {
+        <<record_video_fixed.py>>
+        +record_continuous(env, baseline)
+        +main(args)
+    }
+
+    ParallelEnv <|-- SumoParallelEnv
+    DefaultPPOTorchRLModule <|-- CentralizedCriticPPOModule
+
+    SumoParallelEnv --> SumoRenderer : render() 호출
+    SumoParallelEnv ..> MapPresets : resolve_map_args() 사용
+
+    TrainScript --> SumoParallelEnv : env 생성
+    TrainScript ..> CentralizedCriticPPOModule : --ctde 시 사용
+    TrainScript ..> MapPresets : 맵 해상
+
+    EvaluateScript --> SumoParallelEnv : env 생성
+    EvaluateScript ..> CentralizedCriticPPOModule : 모델 로드
+    EvaluateScript ..> MapPresets : 맵 해상
+
+    RecordVideoScript --> SumoParallelEnv : env 생성
+    RecordVideoScript ..> CentralizedCriticPPOModule : 모델 로드
+
+    RecordFixedScript --> SumoParallelEnv : env 생성

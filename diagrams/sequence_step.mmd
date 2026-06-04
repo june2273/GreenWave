@@ -1,0 +1,26 @@
+sequenceDiagram
+    participant Policy as RLlib Policy
+    participant env as SumoParallelEnv
+    participant SUMO as SUMO / TraCI
+
+    Policy->>env: step({tl_0: a0, tl_1: a1, …})
+
+    loop 각 agent (tl_i)
+        env->>env: elapsed ≥ min_green?
+        alt phase 변경 요청 & elapsed 충분
+            env->>SUMO: setPhase(yellow_phase)
+            env->>SUMO: simulationStep × yellow_time (3s)
+            env->>SUMO: setPhase(new_green_phase)
+            env->>SUMO: setPhaseDuration(100000s) [auto-cycle 차단]
+            env->>env: reward -= switch_penalty (0.45)
+        else 현상 유지 또는 min_green 미충족
+            env->>SUMO: simulationStep × delta_time (5s)
+        end
+    end
+
+    SUMO-->>env: lane.getLastStepVehicleNumber<br/>lane.getWaitingTime<br/>vehicle.getVClass
+
+    env->>env: _build_obs(agent)<br/>[phase_one_hot | min_green_flag | density | queue]
+    env->>env: _compute_reward(agent)<br/>(prev_wait − curr_wait) / 10<br/>BRT 차량은 × brt_weight
+
+    env-->>Policy: obs_dict, rew_dict, done_dict, info_dict

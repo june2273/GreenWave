@@ -172,6 +172,9 @@ def main():
         env_kwargs["sumo_cfg"] = sumo_cfg_effective
     env = SumoParallelEnv(**env_kwargs)
 
+    # 렌더 타이틀 라벨 (예: "FixedTime(Sejong)" / "FixedTime(Symmetric)")
+    env.render_label = label
+
     # ── 롤아웃 + 프레임 캡쳐 ─────────────────────────────────────
     try:
         obs_dict, _ = env.reset(seed=args.seed)

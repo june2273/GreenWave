@@ -552,6 +552,10 @@ def main():
         "traffic":           train_meta.get("traffic", args.traffic),
     }
     for k, v in meta_prefix.items():
+        # entropy_coeff 가 schedule 리스트([[step,val],...]) 인 경우 등 비스칼라 값은
+        # 문자열로 직렬화해야 df.insert 가 전 행에 broadcast 됨 (length mismatch 방지).
+        if isinstance(v, (list, tuple, dict)):
+            v = json.dumps(v, ensure_ascii=False)
         df.insert(0, k, v)
 
     # ── 저장 및 출력 ──────────────────────────────────────────────────────

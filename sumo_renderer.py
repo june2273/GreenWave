@@ -332,6 +332,7 @@ class SumoRenderer:
         max_steps: int,
         queue_per_lane: Optional[Dict[str, List[float]]] = None,
         lane_ids: Optional[Dict[str, List[str]]] = None,
+        title_label: Optional[str] = None,
     ) -> np.ndarray:
         """
         Parameters
@@ -341,6 +342,9 @@ class SumoRenderer:
             제공 시 obs[:4] 의존 없이 정확한 큐 막대 시각화.
         lane_ids : {agent: [lane_id, ...]} — queue_per_lane 의 lane id 순서.
             lane_id 가 controlled lane 순서와 1:1 매칭되어야 함.
+        title_label : 타이틀 첫 줄에 표시할 모델 식별 라벨
+            (예: "MAPPO · iter 185", "CTDE · iter 130", "FixedTime(Sejong)").
+            None 이면 Step 줄만 표시.
         """
         if self._net is None:
             return self._render_fallback(
@@ -541,15 +545,19 @@ class SumoRenderer:
 
         # agent 가 많으면 (3x2 grid → 6 agent) 한 줄 가로 길이가 figure 폭 초과해
         # 좌우 텍스트가 잘림. 줄당 최대 PER_ROW agent 로 자동 줄바꿈.
-        PER_ROW = 4
+        # PER_ROW=3 → 6 agent 가 3+3 으로 균형 분할 (4+2 비대칭 방지).
+        PER_ROW = 3
         agents_sorted = sorted(agent_to_tls.keys())
         title_chunks = [
             "   ".join(_fmt_phase(ag) for ag in agents_sorted[i:i + PER_ROW])
             for i in range(0, len(agents_sorted), PER_ROW)
         ]
         title_body = "\n".join(title_chunks)
+        # 첫 줄: 모델 식별 라벨(있으면) + Step 카운터
+        header = (f"{title_label} | Step {sim_step} / {max_steps}"
+                  if title_label else f"Step {sim_step} / {max_steps}")
         ax.set_title(
-            f"Step {sim_step} / {max_steps}\n{title_body}",
+            f"{header}\n{title_body}",
             color="white", fontsize=11, fontweight="bold", pad=10,
         )
 

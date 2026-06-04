@@ -50,6 +50,25 @@ def _load_rl_module(model_path: str) -> RLModule:
     return RLModule.from_checkpoint(str(module_path))
 
 
+def _build_render_label(model_path: str) -> str:
+    """체크포인트 train_metadata.json → 렌더 타이틀 라벨.
+
+    "MAPPO · iter 185" / "CTDE · iter 130" 형식.
+    metadata 가 없으면 모델 디렉터리명으로 폴백.
+    """
+    import json
+    meta_path = Path(model_path) / "train_metadata.json"
+    if meta_path.exists():
+        try:
+            meta = json.loads(meta_path.read_text())
+            algo = "CTDE" if meta.get("ctde_mode") else "MAPPO"
+            it = meta.get("train_iter")
+            return f"{algo} · iter {it}" if it is not None else algo
+        except Exception:
+            pass
+    return Path(model_path).name
+
+
 def parse_args():
     p = argparse.ArgumentParser(description="Record MAPPO policy rollout as mp4")
     p.add_argument("--model", type=str, required=True,
@@ -141,6 +160,10 @@ def main():
     if sumo_cfg_effective:
         env_kwargs["sumo_cfg"] = sumo_cfg_effective
     env = SumoParallelEnv(**env_kwargs)
+
+    # 렌더 타이틀 라벨: 체크포인트 train_metadata.json 에서 MAPPO/CTDE + iter 추출
+    env.render_label = _build_render_label(str(Path(args.model).resolve()))
+    print(f"[render label] {env.render_label}")
 
     try:
         obs_dict, _ = env.reset(seed=args.seed)
