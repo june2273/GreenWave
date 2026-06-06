@@ -95,8 +95,9 @@ def parse_args():
     p.add_argument("--map", type=str, default="single", choices=MAP_CHOICES,
                    help="시나리오 사전셋. 학습 시 사용한 --map 과 일치해야 함.")
     p.add_argument("--reward-mode", type=str, default="diff-waiting-time",
-                   choices=["diff-waiting-time"],
-                   help="보상 모드. 현재 diff-waiting-time 단일 모드만 지원.")
+                   choices=["diff-waiting-time", "pressure"],
+                   help="보상 모드. diff-waiting-time(기본) / pressure (Σ#하류 − Σ#상류). "
+                        "학습 시와 동일하게 지정.")
     p.add_argument("--sumo-cfg", type=str, default=None,
                    help="SUMO 설정 파일 경로 (학습 시와 동일하게 지정)")
     p.add_argument("--traffic", type=str, default="default",
