@@ -465,27 +465,11 @@ def main():
           f"| act=Discrete({num_green})")
     probe_env.close()
 
-    # 하이퍼파라미터 — 한 곳에 모아두고 메타데이터에도 동일하게 기록
-    # 변경 이력 (MAPPO_sumo_11 부터):
-    #   (B4) entropy_coeff   0.02  → 0.005  — reward magnitude 와 균형 맞춤
-    #                                          (이전엔 entropy bonus 가 reward 신호와
-    #                                          동일 스케일이라 exploration 편향 과도)
-    #   (B5) entropy_coeff   0.005 → 0.03  — dense traffic 의 좌회전 phase 가 학습
-    #                                          초기 부정 reward → 확률 0 으로 collapse
-    #                                          후 영구 미선택 되는 mode collapse 진단됨
-    #                                          (eval_metrics_mappo_17 에서 모든 ep act_dist
-    #                                          이 NS·EW 직진 phase 에만 집중, 좌회전 ratio
-    #                                          ~0). entropy bonus 6배 강화 (0.005 → 0.03)
-    #                                          로 4개 phase 모두 충분히 탐색하게 함.
-    #                                          (RLlib 버전 안전성 위해 schedule 대신 scalar.
-    #                                          collapse 가 풀린 뒤 fine-tune 시 0.005 로
-    #                                          낮춰 exploit 단계 별도 진행 권장.)
-    #   (A3) vf_clip_param   500.0 → 10.0 → 1000.0
-    #                                          10.0 으로 낮췄더니 vf_loss_unclipped=175189
-    #                                          대비 vf_loss=9.89 로 VF 신호 거의 전부 소실
-    #                                          → diff-waiting-time 실제 reward 스케일에 맞춰
-    #                                            1000.0 으로 복원
-    #   (C4) train_batch_size 4000 → 8000   — gradient noise variance 감소 (∝ 1/N)
+    # 하이퍼파라미터 — 한 곳에 모아 메타데이터에도 동일하게 기록.
+    # 주요 값의 튜닝 근거는 CLAUDE.md 의 "PPO Hyperparameters" 표 참조:
+    #   entropy_coeff=0.03  : 좌회전 phase mode collapse 방지 (dense 시나리오)
+    #   vf_clip_param=1000  : diff-waiting reward 스케일(~수천)에 맞춰 VF 신호 보존
+    #   train_batch_size=8000: gradient noise variance 감소
 
     # CLI 명시값 > resume metadata > default 우선순위로 hparams 결정.
     # args.lr / args.entropy_coeff 는 default=None 이라서 None=미명시 구분 가능.
@@ -504,13 +488,11 @@ def main():
         clip_param=0.2,
         vf_loss_coeff=0.5,
         entropy_coeff=_pick(args.entropy_coeff, "entropy_coeff", 0.03),
-        vf_clip_param=1000.0,     # A3: 500 → 10 → 1000 (VF signal 복원)
+        vf_clip_param=1000.0,     # diff-waiting reward 스케일(~수천)에 맞춤
     )
-    # entropy 스케줄: 지정 시 고정 entropy_coeff 를 [[step,val],...] 선형 스케줄로 대체.
-    # 약한 보상신호가 살아난 뒤 정책을 sharpening 하도록 초반 탐색→후반 수렴 유도.
-    # 새 API 스택은 entropy_coeff 자체에 schedule 리스트를 받음 (entropy_coeff_schedule 아님).
-    # timestep 은 학습 누적 env step 기준 → train_batch_size × num_iters 로 horizon 산정,
-    # 75% 지점에서 END 도달 후 유지. hparams 공유라 MAPPO·CTDE 에 동일 적용됨.
+    # entropy 스케줄(선택): 고정 entropy_coeff 를 [[step,val],...] 선형 스케줄로 대체해
+    # 초반 탐색→후반 sharpening 을 유도. 새 API 스택은 entropy_coeff 에 직접 schedule 을
+    # 받으며, horizon(train_batch_size × num_iters)의 75% 지점에서 END 도달 후 유지한다.
     if args.entropy_schedule is not None:
         ent_start, ent_end = float(args.entropy_schedule[0]), float(args.entropy_schedule[1])
         total_steps = int(args.num_iters) * int(hparams["train_batch_size"])

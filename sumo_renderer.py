@@ -139,8 +139,7 @@ class SumoRenderer:
         # 큐 막대 길이 축소 (0.18 → 0.10): 단일 막대로 복귀했으므로 짧게도
         # 충분히 인지 가능. 인접 교차로 간 시각 분리 강화.
         BLEN = sz * 0.10
-        # 단일 막대 → 다소 두껍게 (이전 평행 3개 sz×0.006 → 단일 sz×0.014).
-        BW   = sz * 0.014
+        BW   = sz * 0.014   # 큐 막대 두께
         return IO, RA, RI, BLEN, BW, (xmin, ymin, xmax, ymax)
 
     # ── Phase → 활성 방향 매핑 (옵션 B: net.xml 직접 파싱) ─────────────────────
@@ -406,11 +405,7 @@ class SumoRenderer:
             green_dirs  = self._active_dirs_for(agent, agent_to_tls, current_phase)
             yellow_dirs = self._yellow_dirs_for(agent, agent_to_tls, current_phase)
             movement    = self._phase_movement_for(agent, agent_to_tls, current_phase)
-            # 좌회전 허용 phase: "Lt" 포함 시 표시.
-            # 단일 교차로 (single.sumocfg) 는 모든 phase 가 "Lt+Th" 라서 이전의
-            # `"+" not in movement` 조건이 한 번도 만족 안 됨 → 좌회전 마커 미표시 버그.
-            # 2x2grid 처럼 phase 가 분리된 경우 ("Lt", "Rt+Th" 등) 에서는
-            # Lt 가 active 한 phase 만 마커가 뜨므로 영향 없음.
+            # 좌회전 허용 phase: movement 문자열에 "Lt" 포함 시 표시.
             is_left_turn_phase = "Lt" in movement
             obs = last_obs.get(agent, np.zeros(10, dtype=np.float32))
 
@@ -474,8 +469,8 @@ class SumoRenderer:
                             zorder=5, markeredgewidth=0)
 
             # ── ② 큐 막대 ────────────────────────────────────────────────────
-            # 방향별 총 큐 합산 → 단일 막대 (이전 3-카테고리 평행 분리는 가독성
-            # 문제로 원복). 막대 색은 큐 길이 임계값 기반 (초록/주황/빨강).
+            # 방향별 총 큐를 합산해 방향당 단일 막대로 표시. 색은 큐 길이 임계값 기반
+            # (초록/주황/빨강).
             _DVEC = {"N": (0,1), "S": (0,-1), "E": (1,0), "W": (-1,0)}
             dir_queue: Dict[str, float] = {}
 

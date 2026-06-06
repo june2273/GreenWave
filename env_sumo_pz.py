@@ -187,21 +187,17 @@ class SumoParallelEnv(ParallelEnv):
         self._throughput: int = 0
         self._queue_cumsum: float = 0.0
 
-        # Insertion-failure 가시화 카운터 (dense traffic 좌회전 lane saturation 진단)
-        # SUMO 는 lane이 꽉 차면 차량 출발 자체를 silent 하게 막아 queue/teleport
-        # 어디에도 잡히지 않음. loaded - departed = pending insertion (sim 밖 대기).
-        # 누적값: 매 step getLoadedNumber/getDepartedNumber 를 합산.
+        # Insertion-failure 진단 카운터. lane 포화 시 SUMO 가 차량 출발을 막아도
+        # queue/teleport 에 안 잡히므로 loaded - departed = pending insertion 으로 추적.
         self._episode_loaded_total: int = 0
         self._episode_departed_total: int = 0
         self._episode_pending_peak: int = 0
         self._episode_pending_final: int = 0
 
-        # 옵션 C: yellow 시간 누적 — oscillation 진단 (yellow_ratio = yellow/total)
-        # 매 switch 마다 yellow_time 초가 추가됨. switch 가 잦을수록 yellow 비율 ↑.
-        # 1 episode 의 (총 시뮬레이션된 sec, yellow 진행된 sec) 모두 추적.
+        # yellow 누적 시간 — oscillation 진단 (yellow_ratio = yellow / total sec).
         self._episode_yellow_seconds: int = 0
 
-        # 진단 카운터 (action_counts는 동적 num_green 길이)
+        # 진단 카운터 (action_counts 는 동적 num_green 길이)
         self._episode_phase_switches: int = 0
         self._episode_max_queue: float = 0.0
         self._episode_action_counts: np.ndarray = np.zeros(self._num_green, dtype=np.int64)
@@ -1006,9 +1002,8 @@ class SumoParallelEnv(ParallelEnv):
                 "vehicles_lost_insert":  int(self._episode_loaded_total - self._episode_departed_total),
                 "pending_insert_peak":   int(self._episode_pending_peak),
                 "pending_insert_final":  int(self._episode_pending_final),
-                # 옵션 C: yellow 비율 — phase oscillation 정도 단일 수치 진단
-                # yellow_ratio 가 (yellow_time / delta_time / num_green) 의 균형값
-                # (단일교차로 기본 ≈ 0.07) 보다 크게 높으면 oscillation 의심.
+                # yellow 비율 — phase oscillation 정도의 단일 수치 진단.
+                # 균형값(단일교차로 기본 ≈ 0.07)보다 크게 높으면 oscillation 의심.
                 "yellow_seconds":        int(self._episode_yellow_seconds),
                 "yellow_ratio":          (float(self._episode_yellow_seconds) / float(self.sim_step)
                                           if self.sim_step > 0 else 0.0),
