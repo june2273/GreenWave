@@ -295,7 +295,7 @@ def main():
     env_mappo = SumoParallelEnv(**env_kwargs, ctde_mode=False) if module is not None else None
     env_fix   = SumoParallelEnv(**env_kwargs, ctde_mode=False)
     env_ctde = (
-        SumoParallelEnv(**env_kwargs, ctde_mode=True, ctde_shared_reward=True)
+        SumoParallelEnv(**env_kwargs, ctde_mode=True, ctde_shared_reward=False)
         if module_ctde is not None else None
     )
 

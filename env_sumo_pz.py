@@ -72,7 +72,7 @@ class SumoParallelEnv(ParallelEnv):
         reward_mode: str = "diff-waiting-time",
         tls_ids: Optional[List[str]] = None,
         ctde_mode: bool = False,
-        ctde_shared_reward: bool = True,
+        ctde_shared_reward: bool = False,
         switch_penalty: float = 0.45,
         brt_weight: float = 1.0,
         time_to_teleport: int = 300,

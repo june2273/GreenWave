@@ -36,8 +36,8 @@ export PYTHONPATH="$SUMO_HOME/tools:$PYTHONPATH"
 # ── 개발·실험용 (2x2) ────────────────────────────────────────────────────────
 python train_mappo.py --map 2x2 --num-iters 200 --num-workers 1
 python train_mappo.py --map 2x2-brt --num-iters 200          # BRT corridor on left col
-python train_mappo.py --map 2x2-brt --ctde                   # CTDE-MAPPO, saves to MAPPO_CTDE_sumo_N/
-python train_mappo.py --map 2x2-brt --ctde --ctde-reward local
+python train_mappo.py --map 2x2-brt --ctde                   # CTDE-MAPPO (reward=local 기본), saves to MAPPO_CTDE_sumo_N/
+python train_mappo.py --map 2x2-brt --ctde --ctde-reward shared  # (비권장) 옛 global-mean 보상 재현용
 
 # ── 세종시 현실 시뮬레이션 최종 버전 (3x2-brt) ────────────────────────────────
 python train_mappo.py --map 3x2-brt --traffic high --num-iters 300 --num-workers 1

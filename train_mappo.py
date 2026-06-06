@@ -361,10 +361,12 @@ def parse_args():
                    help="Centralized critic (CTDE) 모드 활성화. "
                         "Actor 는 local obs, Critic 은 전체 agent obs concat 을 봄. "
                         "Green Wave 형 협조 학습 유도. 체크포인트는 MAPPO_CTDE_sumo_N 에 저장.")
-    p.add_argument("--ctde-reward", type=str, default="shared",
+    p.add_argument("--ctde-reward", type=str, default="local",
                    choices=["shared", "local"],
-                   help="--ctde 와 함께 사용. shared: 모든 agent 가 mean(local rewards) 받음 "
-                        "(global coordination). local: 기존 per-agent reward 유지.")
+                   help="--ctde 와 함께 사용. 기본 local: per-agent reward 유지 "
+                        "(N=6 에서 credit 희석 없이 학습 성공 — 검증됨). "
+                        "shared: 모든 agent 가 mean(local rewards) 받음 (global coordination, "
+                        "N=6/LOS D+ 에서 credit 희석로 정책 동결 → 비권장, 재현용으로만).")
     # ── Chain training (체크포인트 이어서 학습) ──────────────────────────
     p.add_argument("--resume-from", type=str, default=None,
                    help="체크포인트 디렉터리 경로 (예: models/MAPPO_sumo_2). "
@@ -559,7 +561,11 @@ def main():
                         observation_space=obs_space,
                         action_space=act_space,
                         model_config={
-                            "hidden_dim": 128,
+                            "hidden_dim": 128,       # actor encoder 폭
+                            # critic encoder 폭 (actor 와 분리). N=6 의 150-d global
+                            # concat fit 위해 256 (입력>hidden 압축병목 회피). 학습
+                            # 전용이라 inference 비용 0.
+                            "vf_hidden_dim": 256,
                             # module 이 flat Box 에서 local 부분 slice 할 때 사용
                             "local_dim": local_dim_for_module,
                         },
