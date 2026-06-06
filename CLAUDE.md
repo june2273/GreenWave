@@ -78,11 +78,28 @@ python record_video_fixed.py --baseline symmetric --map 2x2-brt
 python record_video_fixed.py --baseline sejong --map 3x2-brt --traffic high
 # → videos/fixed_sejong_3x2_brt.mp4 (SEJONG_PER_TLS_PHASE_SECONDS, 6 TLS 각각 다른 cycle)
 
+# ── 통계적 신뢰성 분석 (stats_eval.py) ───────────────────────────────────────
+# evaluate_mappo.py 의 paired CSV → 통계 검정·효과크기·신뢰구간으로 "신뢰성" 증거 생성.
+# (성능 지표가 좋다 ≠ 우연이 아니다. RL 평가 표준: 부트스트랩 CI + 비모수 검정.)
+# 1) 검정력 확보를 위해 평가를 충분한 episode 로 (5 → 권장 30):
+python evaluate_mappo.py --model models/MAPPO_sumo_N --model-ctde models/MAPPO_CTDE_sumo_N \
+  --map 3x2-brt --traffic high --baseline sejong --episodes 30
+# 2) 생성된 paired CSV 를 통계 분석 (재학습·SUMO 불필요, 수 초):
+python stats_eval.py --csv results/eval_metrics_mappo_N.csv
+# → results/stats_eval_metrics_mappo_N/ 아래:
+#   stats_tests.csv   (Friedman + 쌍별 Wilcoxon+Holm + A12 효과크기)
+#   stats_ci.csv      (알고리즘별 mean·IQM 의 부트스트랩 95% CI)
+#   stats_summary.txt (사람이 읽는 요약 + 발표용 헤드라인 문장 자동 생성)
+#   figs/box_*.png, figs/forest_*.png (분포 박스플롯 / IQM±CI forest plot)
+# 주의: paired n 이 작으면(예 5) Wilcoxon 의 양측 최소 p = 2/2ⁿ = 0.0625 라
+#   Friedman 이 유의해도 쌍별 검정이 절대 유의 불가 → 쌍별 유의에는 n≥7 (Holm 3쌍이면
+#   더 필요), 안정적 결론엔 n≈30 권장. A12 효과크기는 n 작아도 해석 가능.
+
 # Run environment smoke test (default: single intersection)
 python env_sumo_pz.py
 ```
 
-All four top-level scripts (`train_mappo.py`, `evaluate_mappo.py`, `record_video_mappo.py`, `record_video_fixed.py`) terminate via `os._exit()` after completion to kill Ray worker processes and SUMO zombie processes that would otherwise hang the interpreter.
+`train_mappo.py`, `evaluate_mappo.py`, `record_video_mappo.py`, `record_video_fixed.py` 4개 상위 스크립트는 완료 후 `os._exit()` 로 종료해 Ray worker·SUMO 좀비 프로세스를 정리한다 (인터프리터 hang 방지). `stats_eval.py` 는 SUMO/Ray 비의존 순수 사후분석이라 일반 종료한다.
 
 ## Architecture
 
@@ -113,6 +130,8 @@ RLlib PPO (shared policy)  ←({agent: obs/rew})←  SumoParallelEnv  ←──�
 **`evaluate_mappo.py`** — 3-way comparison: MAPPO vs CTDE-MAPPO (optional) vs Fixed-time. Results saved to `results/eval_metrics_mappo_N.csv` with metadata prefix columns for model traceability. `--baseline` 선택: `symmetric` (균등 N-step 사이클, 기본) / `sejong` (공공데이터포털·세담터 실측 자료 기반 per-TLS 비대칭 신호 — `SEJONG_PER_TLS_PHASE_SECONDS` dict 의 6 TLS 매핑).
 
 **`record_video_fixed.py`** — Fixed-Time 베이스라인 영상 녹화 (RL 모델 불필요, Ray 의존 없음). `record_video_mappo.py` 와 동일한 continuous/short 모드 + frame hook 구조. `--baseline symmetric` 은 3-way 비교용 균등 4×15s 사이클; `--baseline sejong` 은 세종시 실측 per-TLS 비대칭 신호 (`SEJONG_PER_TLS_PHASE_SECONDS` 와 `_phase_from_secs` 는 `evaluate_mappo.py` 1:1 복제 → 비디오와 평가 CSV 가 동일 행동 묘사). 기본 출력 경로: `videos/fixed_<baseline>_<map>.mp4`.
+
+**`stats_eval.py`** — `evaluate_mappo.py` 의 paired CSV(`results/eval_metrics_mappo_N.csv`)를 읽어 통계적 신뢰성 분석을 수행하는 독립 사후분석기 (SUMO/Ray 비의존). evaluate 평가 루프가 세 알고리즘을 매 episode 동일 seed 로 실행하는 **paired/blocked 설계**임을 활용 → 지표마다 **Friedman**(omnibus 게이트, 알고리즘 ≥3) → **쌍별 Wilcoxon signed-rank + Holm 보정**(사후, 2-way 면 단일 Wilcoxon 으로 graceful) → **Vargha–Delaney A12** 효과크기(`HIGHER_BETTER` 방향맵 반영) → **부트스트랩 95% CI**(mean + IQM, IQM=양끝 25% 절사평균으로 Agarwal 2021식 이상치 강건). 상수 지표(예 `teleported=0` 전역)는 검정 생략·CI만 기록 (텔레포트 인공물 아님 검증). 산출: `stats_tests.csv`/`stats_ci.csv`/`stats_summary.txt`(발표용 헤드라인 자동 생성)/`figs/{box,forest}_*.png`. 헤드라인 지표는 `avg_waiting_time`. 그림 텍스트는 ASCII(기본 폰트에 한글 글리프 없음). raw row 는 `algorithm` 이 `_mean`/`_std` 가 아닌 행으로 식별.
 
 **`ctde_module.py`** — `CentralizedCriticPPOModule` extends `DefaultPPOTorchRLModule` with separate actor (local obs slice, first `D` dims) and critic (global obs slice, remaining `D*N` dims) encoders. Both are 2-layer MLPs with Tanh. Bypasses `PPOCatalog`. Registered via `MultiRLModuleSpec` in `train_mappo.py` when `--ctde` is set. The actor uses only `obs[:local_dim]` at execution time; critic is stripped in inference-only workers via `get_non_inference_attributes()`.
 

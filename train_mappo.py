@@ -328,9 +328,10 @@ def parse_args():
     p.add_argument("--seed", type=int, default=42,
                    help="전역 랜덤 시드 (random/numpy/torch/SUMO 일괄 설정)")
     p.add_argument("--reward-mode", type=str, default="diff-waiting-time",
-                   choices=["diff-waiting-time"],
-                   help="보상 함수 모드 (diff-waiting-time: 이전 step 누적대기시간 - 현재) / 10. "
-                        "현재 단일 모드만 지원 (queue/pressure 는 cleanup 으로 제거됨).")
+                   choices=["diff-waiting-time", "pressure"],
+                   help="보상 함수 모드. diff-waiting-time(기본): (이전 step 누적대기시간 - 현재)/10. "
+                        "pressure: Σ#(하류) - Σ#(상류), 과포화 스필백 억제(backpressure). "
+                        "pressure 는 스케일이 작아 --switch-penalty 0.1 전후 권장.")
     p.add_argument("--switch-penalty", type=float, default=0.45,
                    help="phase switch 마다 reward 에서 빼는 페널티 (oscillation 억제). "
                         "0 = 비활성, 0.45 = yellow 3sec × 1대/sec 손실 추정 (yellow_time=3 기본값에 맞춤).")

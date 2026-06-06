@@ -21,9 +21,11 @@ GreenWave는 SUMO 시뮬레이터 위에서 **여러 교차로 신호를 동시�
 |------|------|
 | **CTDE-MAPPO** | Actor는 자기 교차로만 보고 실행, Critic은 전체 교차로 정보를 보고 학습 → 교차로 간 협조(Green Wave) 유도 |
 | **BRT 우선처리 보상함수** | 세종시 BRT 노선 특화 — vClass=bus 차량의 대기시간을 `w`배 가중해 정책이 버스 우선 신호를 자연스럽게 학습 |
+| **이중 보상 모드** | `--reward-mode` 로 `diff-waiting-time`(차분) / `pressure`(max-pressure, 하류 포화 억제) 전환 — 동일 하이퍼파라미터 ablation |
 | **동적 시나리오 전환** | `--map` 하나로 단일·격자·BRT 시나리오 전환, TLS 위상 자동 감지 |
 | **다양한 평가 모드** | 2-way (단일 모델 vs Fixed) / 3-way (MAPPO vs CTDE vs Fixed) / 세종 (세종 실측 신호 베이스라인) — 동일 시드 쌍대 평가 → CSV 자동 저장 |
-| **정책 롤아웃 영상** | matplotlib 기반 실시간 신호 시각화, mp4 출력 |
+| **통계적 신뢰성 평가** | `stats_eval.py` — Friedman + 쌍별 Wilcoxon(Holm) + A₁₂ 효과크기 + 부트스트랩 CI로 비교 우위의 통계적 유의성 검증 |
+| **정책 롤아웃 영상** | matplotlib 기반 실시간 신호 시각화, mp4 출력 (3-way 비교 합성 지원) |
 
 ---
 
@@ -165,14 +167,26 @@ BRT처럼 lane 수가 혼합된 토폴로지에서는 작은 agent의 obs에 0 �
 
 ### Reward
 
+`--reward-mode` 로 두 보상 함수를 선택합니다 (둘 다 phase switch마다 `switch_penalty`를 차감).
+
+**`diff-waiting-time` (기본)** — 차분 기반, 자기 진입로 대기시간만 봅니다.
+
 ```
 reward = (이전 step 누적대기시간 − 현재) / 10.0  −  switch_penalty (기본 0.45)
 ```
 
+**`pressure`** — max-pressure / backpressure (Varaiya 2013, PressLight 2019). 상태 기반으로 **하류 포화를 직접 반영**해 과포화(LOS D+) 스필백·grid lock을 억제합니다.
+
+```
+reward = Σ#(out_lanes 차량) − Σ#(in_lanes 차량)  −  switch_penalty
+```
+
+> `pressure`는 스케일이 작아(±수십, diff-waiting의 ~수천 대비) `switch_penalty` 0.45가 상대적으로 과해집니다 → 학습 시 `--switch-penalty 0.1` 전후 권장. 차량 *수* 기반이라 `brt_weight` 미적용. 동일 하이퍼파라미터로 두 보상의 ablation 비교가 가능합니다.
+
 `switch_penalty = 0.45` ≈ yellow 3초 × 1대/초 손실 (`yellow_time=3` 기준).
 yellow_time=2 로 학습된 이전 체크포인트 재사용 시 `--switch-penalty 0.3` 명시.
 
-`--brt-weight w` (BRT 시나리오 전용): 보상함수에서 BRT(vClass=bus) 대기시간에 부여하는 중요도 계수. `w=1.0` = 일반 차량과 동등 취급 (baseline). `w>1` → BRT 대기시간 감소를 더 크게 보상해 정책이 BRT 우선 신호를 학습하도록 유도. 실제 대기시간을 늘리는 게 아닌 보상 신호의 비중 조정 (권장: `2.0~3.0`).
+`--brt-weight w` (BRT 시나리오 전용, `diff-waiting-time`에서만 reward 반영): BRT(vClass=bus) 대기시간 가중치. `w=1.0` = 일반 차량과 동등 취급 (baseline). `w>1` → BRT 대기시간 감소를 더 크게 보상해 정책이 BRT 우선 신호를 학습하도록 유도. 실제 대기시간을 늘리는 게 아닌 보상 신호의 비중 조정 (권장: `2.0~3.0`).
 
 ---
 
@@ -185,6 +199,7 @@ yellow_time=2 로 학습된 이전 체크포인트 재사용 시 `--switch-penal
 | `--map` | `single` | 시나리오 선택 (`single`/`2x2`/`2x2-brt`/`3x2`/`3x2-brt`) |
 | `--ctde` | off | Centralized critic 활성화 → `MAPPO_CTDE_sumo_N/` 에 저장 |
 | `--traffic` | `default` | `high` = 정체 (세종 실측 / dense routes) |
+| `--reward-mode` | `diff-waiting-time` | 보상 함수. `pressure` = max-pressure (하류 포화 억제). pressure 시 `--switch-penalty 0.1` 권장 |
 | `--num-iters` | 200 | 학습 반복 횟수 (1 iter = 8,000 steps) |
 | `--num-workers` | 1 | 병렬 env runner 수 (`0` = 디버그) |
 | `--brt-weight` | 1.0 | BRT(vClass=bus) 차량 waiting time 가중치. 권장 `2.0~3.0` (BRT 시나리오 전용) |
@@ -238,6 +253,48 @@ python record_video_mappo.py --model models/MAPPO_sumo_N --map 2x2-brt
 ```
 
 `--mode {continuous, short}`: 기본 `continuous` 는 매 sim sec 당 1 frame (~3,600 frame, 10fps 기본 → **약 2분** 영상, yellow 전환 자연스러움). `short` 는 env.step() 당 1 frame (~720 frame, 5fps 권장 → **약 40초** 영상).
+
+### 3-way 비교 영상 (FixedTime | MAPPO | CTDE)
+
+`build_3way_compare.py` 는 세 정책 영상을 가로로 합성하고 실시간 지표(대기·CO₂·throughput)를 오버레이합니다. 먼저 세 영상을 **동일 seed·동일 시나리오**로 녹화해야 프레임이 정렬됩니다 (`record_video_fixed.py` 는 Fixed-Time 전용, Ray 비의존).
+
+```bash
+B=videos/3way_sejong
+record_video_fixed.py --baseline sejong --map 3x2-brt --traffic high --seed 777 \
+  --output $B/cmp_fixed.mp4 --dump-metrics $B/cmp_fixed.json
+record_video_mappo.py --model models/MAPPO_sejong_dense --map 3x2-brt --traffic high --seed 777 \
+  --output $B/cmp_mappo.mp4 --dump-metrics $B/cmp_mappo.json
+record_video_mappo.py --model models/CTDE_sejong_dense  --map 3x2-brt --traffic high --seed 777 \
+  --output $B/cmp_ctde.mp4  --dump-metrics $B/cmp_ctde.json
+build_3way_compare.py --base-dir $B --iter 200 --out $B/compare_3way_1080p.mp4
+```
+
+---
+
+## Statistical Reliability
+
+성능 지표가 좋다는 것(performance)과 그 우위가 우연이 아니라는 것(reliability)은 다릅니다.
+`stats_eval.py` 는 `evaluate_mappo.py` 가 만든 **paired CSV**(세 알고리즘이 매 episode 동일 seed로 실행되는 blocked 설계)를 받아 통계적 신뢰성 증거를 생성합니다 — 재학습·SUMO 불필요, 수 초 소요.
+
+```bash
+# 1) 검정력 확보를 위해 충분한 episode 로 평가 (권장 30)
+python evaluate_mappo.py --model models/MAPPO_sejong_dense --model-ctde models/CTDE_sejong_dense \
+  --map 3x2-brt --traffic high --baseline sejong --episodes 30 --csv-out results/eval_sejong_30.csv
+
+# 2) 통계 분석
+python stats_eval.py --csv results/eval_sejong_30.csv
+```
+
+| 단계 | 방법 | 의미 |
+|------|------|------|
+| **Omnibus** | Friedman test | "세 방법 중 어딘가 차이가 있나?" (알고리즘 ≥3 게이트) |
+| **사후(post-hoc)** | 쌍별 Wilcoxon signed-rank + Holm 보정 | "어느 쌍이 유의하게 다른가?" (2-way면 단일 Wilcoxon) |
+| **효과크기** | Vargha–Delaney A₁₂ | "좋은 쪽이 이길 확률" (지표 방향맵 반영) |
+| **신뢰구간** | 부트스트랩 95% CI (mean + IQM) | IQM = 이상치 강건 (Agarwal 2021) |
+
+산출물(`results/stats_<csv명>/`): `stats_tests.csv` · `stats_ci.csv` · `stats_summary.txt`(발표 헤드라인 자동 생성) · `figs/{box,forest}_*.png`.
+
+> **검정력 주의**: paired n이 작으면(예 5) Wilcoxon 양측 최소 p = 2/2ⁿ = 0.0625라 Friedman이 유의해도 쌍별 검정이 유의에 도달할 수 없습니다. 쌍별 유의에는 **n ≥ 7**(Holm 보정 시 더), 안정적 결론엔 **n ≈ 30** 권장. A₁₂ 효과크기는 n이 작아도 해석 가능합니다.
 
 ---
 
@@ -328,9 +385,12 @@ GreenWave/
 ├── env_sumo_pz.py          # PettingZoo ParallelEnv (핵심 환경)
 ├── ctde_module.py          # CTDE RLModule (centralized critic)
 ├── map_presets.py          # --map 시나리오 preset 해상
-├── train_mappo.py          # 학습
-├── evaluate_mappo.py       # 평가 (2-way / 3-way / 세종 모드, → CSV)
+├── train_mappo.py          # 학습 (diff-waiting-time / pressure 보상)
+├── evaluate_mappo.py       # 평가 (2-way / 3-way / 세종 모드, → paired CSV)
+├── stats_eval.py           # 통계적 신뢰성 분석 (Friedman/Wilcoxon/A12/부트스트랩 CI)
 ├── record_video_mappo.py   # 정책 롤아웃 영상
+├── record_video_fixed.py   # Fixed-Time 베이스라인 영상 (Ray 비의존)
+├── build_3way_compare.py   # 3-way 비교 영상 합성 (지표 오버레이)
 ├── sumo_renderer.py        # matplotlib 신호 시각화
 ├── sumo_data/
 │   ├── single/             # 단일교차로 XML

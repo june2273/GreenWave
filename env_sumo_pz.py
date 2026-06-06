@@ -49,8 +49,13 @@ class SumoParallelEnv(ParallelEnv):
                 density/queue는 lane capacity 기반 [0,1] 정규화.
 
     보상(reward_mode):
-      "diff-waiting-time": (이전 step 누적 대기시간 - 현재) / 10. 단일 모드.
-        BRT 시나리오에서 brt_weight 가 vClass=bus 차량에만 곱해짐.
+      "diff-waiting-time" (기본): (이전 step 누적 대기시간 - 현재) / 10. 차분 기반,
+        자기 진입로 대기시간만 본다. BRT 시나리오에서 brt_weight 가 vClass=bus
+        차량에만 곱해진다.
+      "pressure": Σ#(out_lanes 차량) - Σ#(in_lanes 차량). max-pressure/backpressure
+        보상(Varaiya 2013, PressLight 2019). 상태 기반(차분 아님)이라 하류 포화를
+        직접 반영해 과포화 스필백·grid lock 을 억제한다. 차량 *수* 기반이라
+        brt_weight 는 미적용. 스케일이 작아(±수십) switch_penalty 를 낮추는 게 좋다.
     """
 
     metadata = {
@@ -59,7 +64,7 @@ class SumoParallelEnv(ParallelEnv):
         "name": "sumo_intersection_v0",
     }
 
-    REWARD_MODES: List[str] = ["diff-waiting-time"]
+    REWARD_MODES: List[str] = ["diff-waiting-time", "pressure"]
 
     def __init__(
         self,
@@ -103,29 +108,17 @@ class SumoParallelEnv(ParallelEnv):
         self.reward_mode = reward_mode
         self.ctde_mode = bool(ctde_mode)
         self.ctde_shared_reward = bool(ctde_shared_reward)
-        # Phase oscillation 억제용 reward 페널티 (모든 reward_mode 공통 적용)
-        # 매 switch 후 yellow_time 초 동안 throughput 0 → 학습 신호 없음에도
-        # 정책이 switch 직후 reward 회복으로 oscillation 학습하던 문제 해결.
-        # default 0.45 ≈ yellow 3초 × 1대/초 손실 (세종시 신호 3초 yellow 기준).
-        # 이전 yellow_time=2 모델 재사용 시 외부에서 0.3 명시. 과하면 phase 고착화.
+        # Phase switch마다 차감해 oscillation을 억제 (모든 reward_mode 공통).
+        # 기본 0.45 ≈ yellow 3초 × 1대/초 손실. 튜닝 근거는 CLAUDE.md 참조.
         self.switch_penalty = float(switch_penalty)
 
-        # BRT(vClass=bus) 차량 waiting time 가중치.
-        # 1.0 = 비활성 (모든 차량 동일 가중치, 기존 동작과 bit-identical).
-        # reward_mode="diff-waiting-time" 에서만 reward 계산에 반영.
-        # 1.5~3.0 권장; BRT 시나리오(2x2-brt, 3x2-brt)에서만 의미.
-        # 평가 metric (avg_wait_brt/car, avg_speed_brt/car) 는 brt_weight 와 무관하게 항상 기록.
+        # BRT(vClass=bus) 대기시간 가중치. 1.0=비활성(전 차량 동일 취급),
+        # diff-waiting-time 모드에서만 reward에 반영 (BRT 시나리오 권장 1.5~3.0).
         self.brt_weight = float(brt_weight)
 
-        # SUMO 텔레포트 임계 (초). 차량이 정체에서 이 시간 이상 갇히면 SUMO가
-        # 정체 너머로 순간이동시켜 grid lock 을 자가 회복 (deadlock 안전밸브).
-        #   300 (default) = SUMO 기본값. deadlock 만 풀고 정상 대기는 건드리지 않음.
-        #   -1            = 텔레포트 완전 비활성 (과포화 시 영구 grid lock → 보상
-        #                   신호 소멸 → 학습 불가). 이전 동작.
-        # 과포화(LOS D+) 시나리오 학습에는 유한값 필수. 단 너무 짧으면(<120) 정상
-        # 대기 차량까지 순간이동시켜 지표가 과대평가됨. 평가 시 info["teleported"]≈0
-        # 을 확인해 결과가 텔레포트 인공물이 아님을 검증할 것.
-        # 공정 비교를 위해 MAPPO·CTDE·Fixed-Time 모두 동일 값 사용 (env 공유).
+        # SUMO 텔레포트 임계(초). 정체에 갇힌 차량을 정체 너머로 이동시켜 grid lock을
+        # 자가 회복하는 deadlock 안전밸브. 300=기본, -1=비활성(과포화 시 학습 불가).
+        # 공정 비교 위해 전 베이스라인 동일 값 사용. 상세는 CLAUDE.md 참조.
         self.time_to_teleport = int(time_to_teleport)
 
         # SUMO TLS id → PettingZoo agent id 매핑
@@ -906,30 +899,42 @@ class SumoParallelEnv(ParallelEnv):
             # ── 보상 함수 ─────────────────────────────────────────────
             lanes = self._per_agent_lanes[agent]
 
-            # diff-waiting-time: (이전 step 누적대기시간 − 현재) / 10.
-            # BRT 가중치: brt_weight > 1.0 이면 vClass=bus 차량 waiting time 만 w 배 가중.
-            # brt_weight=1.0 일 때는 lane.getWaitingTime 합과 수학적으로 동일 (fast path).
-            if self.brt_weight == 1.0:
-                current_wait = sum(
-                    self.conn.lane.getWaitingTime(ln) for ln in lanes
-                ) / 10.0
+            if self.reward_mode == "pressure":
+                # max-pressure: 하류 차량 수 - 상류 차량 수 (상태 기반).
+                # 하류가 포화일수록 reward 가 낮아져 스필백을 억제한다.
+                out_lanes = self._per_agent_out_lanes[agent]
+                n_out = sum(
+                    self.conn.lane.getLastStepVehicleNumber(ln) for ln in out_lanes
+                )
+                n_in = sum(
+                    self.conn.lane.getLastStepVehicleNumber(ln) for ln in lanes
+                )
+                reward = float(n_out - n_in)
             else:
-                weighted = 0.0
-                for ln in lanes:
-                    for vid in self.conn.lane.getLastStepVehicleIDs(ln):
-                        w = (
-                            self.brt_weight
-                            if self.conn.vehicle.getVehicleClass(vid) == "bus"
-                            else 1.0
-                        )
-                        weighted += w * float(
-                            self.conn.vehicle.getAccumulatedWaitingTime(vid)
-                        )
-                current_wait = weighted / 10.0
-            reward = self._last_wait_measure.get(agent, current_wait) - current_wait
-            self._last_wait_measure[agent] = current_wait
+                # diff-waiting-time: (이전 step 누적대기시간 - 현재) / 10.
+                # brt_weight == 1.0 이면 lane.getWaitingTime 합과 동일 (fast path),
+                # > 1.0 이면 vClass=bus 차량의 누적 대기시간만 w 배 가중한다.
+                if self.brt_weight == 1.0:
+                    current_wait = sum(
+                        self.conn.lane.getWaitingTime(ln) for ln in lanes
+                    ) / 10.0
+                else:
+                    weighted = 0.0
+                    for ln in lanes:
+                        for vid in self.conn.lane.getLastStepVehicleIDs(ln):
+                            w = (
+                                self.brt_weight
+                                if self.conn.vehicle.getVehicleClass(vid) == "bus"
+                                else 1.0
+                            )
+                            weighted += w * float(
+                                self.conn.vehicle.getAccumulatedWaitingTime(vid)
+                            )
+                    current_wait = weighted / 10.0
+                reward = self._last_wait_measure.get(agent, current_wait) - current_wait
+                self._last_wait_measure[agent] = current_wait
 
-            # switch_penalty: oscillation 정책 억제 (모든 mode 공통)
+            # switch_penalty: phase oscillation 억제 (모든 reward_mode 공통)
             if switching[agent] and self.switch_penalty != 0.0:
                 reward -= self.switch_penalty
 
