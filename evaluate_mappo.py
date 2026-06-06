@@ -102,11 +102,9 @@ def parse_args():
     p.add_argument("--yellow-time", type=int, default=3)
     p.add_argument("--map", type=str, default="single", choices=MAP_CHOICES,
                    help="시나리오 사전셋. 학습 시 사용한 --map 과 일치해야 함.")
-    p.add_argument("--reward-mode", type=str, default=None,
-                   choices=["diff-waiting-time", "pressure"],
-                   help="보상 모드. 미지정 시 model 의 train_metadata.json 값 자동 로드 "
-                        "(없으면 diff-waiting-time). 명시 시 metadata 보다 우선. "
-                        "diff-waiting-time / pressure (Σ#하류 − Σ#상류).")
+    p.add_argument("--reward-mode", type=str, default="diff-waiting-time",
+                   choices=["diff-waiting-time"],
+                   help="보상 모드. 현재 diff-waiting-time 단일 모드만 지원.")
     p.add_argument("--time-to-teleport", type=int, default=None,
                    help="SUMO 텔레포트 임계 (초). 미지정 시 model 의 train_metadata.json "
                         "값 자동 로드 (없으면 300). 명시 시 metadata 보다 우선. "
@@ -276,16 +274,6 @@ def main():
         ttt_effective = int(train_meta.get("time_to_teleport", 300))
     print(f"[time_to_teleport={ttt_effective}]")
 
-    # 보상 모드 결정: CLI 명시값 > train_metadata > default(diff-waiting-time).
-    # eval 에서 reward 값 자체는 측정 지표에 안 쓰이지만(정책은 argmax inference,
-    # 측정 컬럼은 전부 info dict 기반), CSV 의 reward_mode 컬럼이 env 실제 설정과
-    # 일치하도록 동일 값으로 해소. brt_weight/time_to_teleport 와 동일한 패턴.
-    if args.reward_mode is not None:
-        reward_mode_effective = args.reward_mode
-    else:
-        reward_mode_effective = train_meta.get("reward_mode", "diff-waiting-time")
-    print(f"[reward_mode={reward_mode_effective}]")
-
     env_kwargs = dict(
         use_gui=False,
         delta_time=args.delta_time,
@@ -293,7 +281,7 @@ def main():
         yellow_time=args.yellow_time,
         max_steps=args.max_steps,
         tls_ids=tls_ids_effective,
-        reward_mode=reward_mode_effective,
+        reward_mode=args.reward_mode,
         brt_weight=brt_weight_effective,
         time_to_teleport=ttt_effective,
     )
@@ -548,7 +536,7 @@ def main():
         "train_iter":        train_meta.get("train_iter", ""),
         "train_iter_ctde":   train_meta_ctde.get("train_iter", ""),
         "train_total_steps": train_meta.get("train_total_steps", ""),
-        "reward_mode":       reward_mode_effective,
+        "reward_mode":       train_meta.get("reward_mode", args.reward_mode),
         "ctde_reward":       train_meta_ctde.get("ctde_reward", ""),
         "lr":                train_meta.get("lr", ""),
         "entropy_coeff":     train_meta.get("entropy_coeff", ""),

@@ -252,10 +252,6 @@ cython_debug/
 # --- GreenWave generated artifacts ---
 # Trained model checkpoints
 /models/
-# 방어선: --out 으로 repo 루트에 잘못 생성된 체크포인트 디렉터리도 무시
-# (정상 경로는 /models/. train_mappo.py 가 바 이름을 models/ 로 해소하지만 안전망)
-/MAPPO_sumo_*/
-/MAPPO_CTDE_*/
 # Keep samples directory (curated reference artifacts)
 !samples/
 

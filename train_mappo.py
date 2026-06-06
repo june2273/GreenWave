@@ -310,9 +310,7 @@ def parse_args():
     p.add_argument("--num-workers", type=int, default=1,
                    help="RLlib rollout worker 수 (SUMO 병렬 인스턴스 수)")
     p.add_argument("--out", type=str, default=None,
-                   help="저장 경로. 바 이름(예: MyRun)은 models/ 아래로 해소됨 "
-                        "(자동 경로 컨벤션과 일치). 디렉터리 포함 경로나 절대경로는 그대로 사용. "
-                        "미지정 시 models/MAPPO_sumo_N 자동 버전 생성.")
+                   help="저장 경로 (미지정 시 models/MAPPO_sumo_N 자동 버전 생성)")
     p.add_argument("--checkpoint-freq", type=int, default=20,
                    help="중간 체크포인트 저장 주기 (iter 단위)")
     p.add_argument("--max-steps", type=int, default=3600)
@@ -330,11 +328,9 @@ def parse_args():
     p.add_argument("--seed", type=int, default=42,
                    help="전역 랜덤 시드 (random/numpy/torch/SUMO 일괄 설정)")
     p.add_argument("--reward-mode", type=str, default="diff-waiting-time",
-                   choices=["diff-waiting-time", "pressure"],
-                   help="보상 함수 모드. "
-                        "diff-waiting-time(기본): (이전 step 누적대기시간 − 현재)/10, 차분 기반. "
-                        "pressure: Σ#(하류) − Σ#(상류), 과포화 스필백 회피(backpressure). "
-                        "pressure 는 스케일 ±수십이라 --switch-penalty 0.1 전후 권장.")
+                   choices=["diff-waiting-time"],
+                   help="보상 함수 모드 (diff-waiting-time: 이전 step 누적대기시간 - 현재) / 10. "
+                        "현재 단일 모드만 지원 (queue/pressure 는 cleanup 으로 제거됨).")
     p.add_argument("--switch-penalty", type=float, default=0.45,
                    help="phase switch 마다 reward 에서 빼는 페널티 (oscillation 억제). "
                         "0 = 비활성, 0.45 = yellow 3sec × 1대/sec 손실 추정 (yellow_time=3 기본값에 맞춤).")
@@ -631,14 +627,7 @@ def main():
     #   - 새 학습: MAPPO_sumo_N / MAPPO_CTDE_sumo_N 자동 버전
     algo_prefix = "MAPPO_CTDE" if args.ctde else "MAPPO"
     if args.out:
-        # 바 이름(디렉터리 구분자 없는 상대경로)은 models/ 아래로 해소 — 자동 경로
-        # 컨벤션(_next_out_path)·help 문구와 일치. .gitignore 는 /models/ 만 무시하므로
-        # repo 루트에 저장하면 체크포인트 .pkl 바이너리가 git 추적됨(오염) → 방지.
-        # 절대경로나 디렉터리 포함 경로(예: /abs/run, runs/exp1)는 사용자 의도대로 유지.
-        out_arg = Path(args.out)
-        if not out_arg.is_absolute() and out_arg.parent == Path("."):
-            out_arg = Path("models") / out_arg
-        out_path = str(out_arg.resolve())
+        out_path = str(Path(args.out).resolve())
     elif args.resume_from:
         out_path = resume_path_abs  # 덮어쓰기 (이미 절대경로)
         print(f"[resume] 저장 경로 = 원본 ({out_path}). fork 하려면 --out 명시.")
