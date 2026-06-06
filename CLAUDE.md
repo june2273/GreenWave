@@ -20,7 +20,7 @@ brew install sumo
 export SUMO_HOME=$(brew --prefix sumo)/share/sumo
 export PYTHONPATH="$SUMO_HOME/tools:$PYTHONPATH"
 ```
-
+  
 **Python dependencies** (in `.venv`):
 - `ray[rllib]`, `torch`, `pettingzoo`, `numpy`, `pandas`
 - `traci==1.20.0`, `sumolib==1.20.0` (pinned to match Homebrew SUMO 1.20.0)
