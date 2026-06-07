@@ -198,6 +198,9 @@ def _row_from_info(algorithm: str, ep: int, seed: int, info: dict) -> dict:
         "avg_speed_car": info.get("avg_speed_car", np.nan),
         "brt_seen":      info.get("brt_seen",      np.nan),
         "car_seen":      info.get("car_seen",      np.nan),
+        # ① 회랑 진행파 직접 지표 (corridor ns-through BRT 평균 속도비).
+        "corridor_brt_speed_ratio": info.get("corridor_brt_speed_ratio", np.nan),
+        "corridor_brt_seen":        info.get("corridor_brt_seen",        np.nan),
     }
     row.update(_action_ratios(info.get("action_counts", [])))
     return row
@@ -305,21 +308,28 @@ def main():
     # 보게 하는 것이 공정하다 (FixedTime 은 obs 미사용 → 무관).
     nb_mappo = bool(train_meta.get("neighbor_obs", False))
     nb_ctde  = bool(train_meta_ctde.get("neighbor_obs", False)) if module_ctde is not None else False
+    # upstream_phase(②) 도 obs 차원 변경이라 모델별 로드. progression(①)은 reward-only →
+    # 추론에 미적용(정책은 obs 만 사용). FixedTime 은 obs 미사용이라 무관.
+    up_mappo = bool(train_meta.get("upstream_phase", False))
+    up_ctde  = bool(train_meta_ctde.get("upstream_phase", False)) if module_ctde is not None else False
     if nb_mappo or nb_ctde:
         print(f"[neighbor_obs] MAPPO={nb_mappo}  CTDE={nb_ctde}")
+    if up_mappo or up_ctde:
+        print(f"[upstream_phase] MAPPO={up_mappo}  CTDE={up_ctde}")
 
     rows = []
 
     # 환경 인스턴스 — MAPPO/FixedTime 은 ctde_mode=False, CTDE 는 True (flat Box).
     # 모든 환경이 같은 seed 로 reset 되어 SUMO 차량 수요가 동일하게 재현됨.
     env_mappo = (
-        SumoParallelEnv(**env_kwargs, ctde_mode=False, neighbor_obs=nb_mappo)
+        SumoParallelEnv(**env_kwargs, ctde_mode=False,
+                        neighbor_obs=nb_mappo, upstream_phase=up_mappo)
         if module is not None else None
     )
     env_fix   = SumoParallelEnv(**env_kwargs, ctde_mode=False)
     env_ctde = (
         SumoParallelEnv(**env_kwargs, ctde_mode=True, ctde_shared_reward=False,
-                        neighbor_obs=nb_ctde)
+                        neighbor_obs=nb_ctde, upstream_phase=up_ctde)
         if module_ctde is not None else None
     )
 
@@ -342,6 +352,8 @@ def main():
         # BRT 우선처리 metric — BRT 시나리오에서 BRT vs 일반 차량 분리 분석
         "avg_wait_brt", "avg_wait_car", "avg_speed_brt", "avg_speed_car",
         "brt_seen", "car_seen",
+        # ① 회랑 진행파 지표
+        "corridor_brt_speed_ratio", "corridor_brt_seen",
         *[f"action_{i}_ratio" for i in range(num_green)],
     ]
 
@@ -564,6 +576,12 @@ def main():
         "ctde_reward":       train_meta_ctde.get("ctde_reward", ""),
         "neighbor_obs":      bool(train_meta.get("neighbor_obs", False)),
         "neighbor_obs_ctde": bool(train_meta_ctde.get("neighbor_obs", False)),
+        "upstream_phase":      bool(train_meta.get("upstream_phase", False)),
+        "upstream_phase_ctde": bool(train_meta_ctde.get("upstream_phase", False)),
+        "progression_coeff":      train_meta.get("progression_coeff", ""),
+        "progression_coeff_ctde": train_meta_ctde.get("progression_coeff", ""),
+        "brt_prog_weight":        train_meta.get("brt_prog_weight", ""),
+        "brt_prog_weight_ctde":   train_meta_ctde.get("brt_prog_weight", ""),
         "lr":                train_meta.get("lr", ""),
         "entropy_coeff":     train_meta.get("entropy_coeff", ""),
         "vf_clip_param":     train_meta.get("vf_clip_param", ""),

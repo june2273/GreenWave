@@ -78,14 +78,15 @@ CTDE Actor:  π_i( a_i | o_i )            ← 자기 obs만 (실행 시 동일)
 └─────────────────────────────────────────────────────────────┘
 ```
 
-#### Topology-aware 확장 (`--neighbor-obs`, 선택)
+#### RL-native Green Wave 확장 (선택, 회랑 진행파 학습)
 
-기본 CTDE critic은 전체 교차로 obs를 단순 concat합니다. 6 교차로 격자에서는 서로 인접하지 않은(직접 영향이 없는) 교차로 정보까지 섞여 critic advantage 추정의 **분산이 커집니다**. `--neighbor-obs` 는 critic 입력과 actor 관측을 **위상 인식(topology-aware)** 구조로 교체합니다:
+기본 CTDE는 보상에 *진행(progression)* 항이, 관측에 상류 platoon *도착 타이밍*이 없어 진행파가 창발하지 않습니다. 한누리대로 BRT 회랑(좌열, N/S축)에서 **무정차 진행파를 학습으로 유도**하는 3 플래그를 추가합니다 (설계: `DESIGN_progression_greenwave.md`):
 
-- **(#1) 이웃 한정 critic** — critic 입력을 전체 concat 대신 `[own | agent_id one-hot | N/E/S/W 이웃 obs]` 로 재구성 → 무관한 비이웃 교차로 정보 제거 + 방향성 부여.
-- **(#3) 상류 incoming 관측** — 각 actor obs 끝에 N/E/S/W 이웃의 상류 혼잡 요약 `[mean_density, mean_queue] × 4` 를 추가 → 분산 실행 정책이 "상류에서 차량이 몰려온다"를 미리 관측(anticipation). critic만 보는 #1과 보완 관계.
+- **`--neighbor-obs` (#1+#3)** — actor obs에 **N/S 이웃**의 상류 혼잡 요약 `[mean_density, mean_queue]×2` 추가(anticipation). `--ctde` 동반 시 critic 입력 = `[own | agent_id one-hot | N/E/S/W 이웃 obs]` → **actor-lean(N/S)/critic-rich(4방향)**.
+- **`--upstream-phase` (②)** — N/S 이웃의 위상 시계 `[phase_one_hot, 경과시간]×2` 추가 → 상류 신호 타이밍을 관측해 green wave 오프셋을 학습. (`--neighbor-obs` 필요.)
+- **`--progression-coeff β` / `--brt-prog-weight` (①)** — 회랑 교차로(BRT 전용차로 보유, 자동식별)의 직진 lane **가중 평균 속도비**를 β배 보상 → 무정차 통과. `brt-prog-weight>1`이면 BRT 우선(Transit Signal Priority).
 
-인접·방향은 네트워크 연결성(`out_lane[A] ∩ in_lane[B]`)과 교차로 상대좌표에서 **자동 도출**되어 하드코딩이 없습니다 (`single`/`2x2`/`3x2` 어느 위상에도 일반화). obs 차원이 바뀌므로(per-agent 25→33, CTDE critic concat 175→171) 미지정(`--neighbor-obs` 없이 학습한) 체크포인트와는 호환되지 않으며, `train_metadata.json` 의 `neighbor_obs` 로 추적돼 평가·녹화 시 모델별로 자동 로드됩니다.
+회랑·인접·방향은 네트워크에서 **자동 도출**됩니다 (BRT 차로=`lane.getAllowed`, 인접=`out_lane∩in_lane`+상대좌표, 하드코딩 0). obs 차원이 바뀌므로(BRT 시나리오 per-agent 25→29→39, CTDE critic 151→**201**) 미지정 체크포인트와 호환되지 않으며, `train_metadata.json`의 `neighbor_obs`/`upstream_phase`로 추적돼 평가·녹화 시 모델별 자동 로드됩니다. 진행파 측정 지표: `corridor_brt_speed_ratio`.
 
 ---
 
@@ -174,7 +175,7 @@ python evaluate_mappo.py \
 
 BRT처럼 lane 수가 혼합된 토폴로지에서는 작은 agent의 obs에 0 패딩 적용.
 
-`--neighbor-obs` 활성화 시 obs 끝에 N/E/S/W 이웃 교차로의 상류 혼잡 요약 `[mean_density, mean_queue] × 4 = +8 dim` 이 추가됩니다 (BRT 시나리오 기준 25 → 33). 위 *Topology-aware 확장* 절 참조.
+`--neighbor-obs` 활성화 시 obs 끝에 **N/S 이웃**의 상류 혼잡 요약 `[mean_density, mean_queue]×2 = +4 dim`이, `--upstream-phase` 까지 켜면 위상 시계 `[phase_one_hot, 경과시간]×2 = +10 dim`이 추가됩니다 (BRT 시나리오 기준 25 → 29 → 39). 위 *RL-native Green Wave 확장* 절 참조.
 
 ### Reward
 
@@ -209,7 +210,10 @@ yellow_time=2 로 학습된 이전 체크포인트 재사용 시 `--switch-penal
 |------|--------|------|
 | `--map` | `single` | 시나리오 선택 (`single`/`2x2`/`2x2-brt`/`3x2`/`3x2-brt`) |
 | `--ctde` | off | Centralized critic 활성화 → `MAPPO_CTDE_sumo_N/` 에 저장 |
-| `--neighbor-obs` | off | Topology-aware 확장: actor에 N/E/S/W 이웃 상류 요약(+8dim) + (`--ctde` 동반 시) 이웃 한정 critic. obs 차원 변경(25→33) → 기존 체크포인트와 비호환, resume 시 값 일치 강제 |
+| `--neighbor-obs` | off | Green Wave 확장: actor에 N/S 이웃 상류 요약(+4dim) + (`--ctde` 동반 시) critic 4-slot. obs 차원 변경(25→29) → 기존 체크포인트와 비호환, resume 시 값 일치 강제 |
+| `--upstream-phase` | off | ② 상류 위상 관측: N/S 이웃 phase+경과시간(+10dim, 29→39) → green wave 오프셋 학습. `--neighbor-obs` 필요 |
+| `--progression-coeff` | 0.0 | ① 회랑 progression 보상 β: BRT 회랑 직진 무정차 통과 가산. diff-waiting 1~5 / pressure 5~20 |
+| `--brt-prog-weight` | 1.0 | ① progression의 BRT 가중치. >1(3~5)=BRT 우선 진행파(TSP) |
 | `--traffic` | `default` | `high` = 정체 (세종 실측 / dense routes) |
 | `--reward-mode` | `diff-waiting-time` | 보상 함수. `pressure` = max-pressure (하류 포화 억제). pressure 시 `--switch-penalty 0.1` 권장 |
 | `--num-iters` | 200 | 학습 반복 횟수 (1 iter = 8,000 steps) |

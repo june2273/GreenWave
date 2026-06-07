@@ -161,13 +161,14 @@ def main():
     )
     if sumo_cfg_effective:
         env_kwargs["sumo_cfg"] = sumo_cfg_effective
-    # neighbor_obs 로 학습된 모델은 actor 가 enriched local obs(+이웃 요약)를 기대하므로
-    # 추론 env 도 동일하게 켜야 한다 (ctde_mode=False 라도 local obs 차원이 일치해야 함).
+    # neighbor_obs / upstream_phase 로 학습된 모델은 actor 가 enriched local obs(+이웃 요약·
+    # 위상)를 기대하므로 추론 env 도 동일하게 켜야 한다 (local obs 차원 일치 필요).
     _meta_path = Path(args.model).resolve() / "train_metadata.json"
     if _meta_path.exists():
         try:
             _m = json.loads(_meta_path.read_text())
             env_kwargs["neighbor_obs"] = bool(_m.get("neighbor_obs", False))
+            env_kwargs["upstream_phase"] = bool(_m.get("upstream_phase", False))
         except Exception:
             pass
     env = SumoParallelEnv(**env_kwargs)

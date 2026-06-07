@@ -260,6 +260,18 @@ def _validate_resume_compat(prev_meta: dict, args) -> None:
             f"[resume] neighbor_obs 변경 불가: 이전={prev_nb}, 현재={new_nb}. "
             f"obs 차원이 달라 weights 호환 불가. 새 학습으로 진행하세요."
         )
+    prev_up = bool(prev_meta.get("upstream_phase", False))
+    new_up  = bool(args.upstream_phase)
+    if prev_up != new_up:
+        raise ValueError(
+            f"[resume] upstream_phase 변경 불가: 이전={prev_up}, 현재={new_up}. "
+            f"obs 차원이 달라 weights 호환 불가. 새 학습으로 진행하세요."
+        )
+    # progression_coeff / brt_prog_weight 는 reward-only(차원 무관) → 경고만.
+    for k in ("progression_coeff", "brt_prog_weight"):
+        pv, nv = prev_meta.get(k), getattr(args, k, None)
+        if pv is not None and nv is not None and float(pv) != float(nv):
+            print(f"[resume] ⚠ {k} 변경 {pv} → {nv} (reward-only, warmup↔dense 일관 권장)")
     prev_map = prev_meta.get("map")
     if prev_map and prev_map != args.map:
         print(f"[resume] ⚠ map 변경 {prev_map} → {args.map} "
@@ -379,11 +391,22 @@ def parse_args():
                         "N=6/LOS D+ 에서 credit 희석로 정책 동결 → 비권장, 재현용으로만).")
     p.add_argument("--neighbor-obs", action="store_true",
                    help="Topology-aware 관측/critic 확장 활성화. "
-                        "(#3) actor obs 에 N/E/S/W 이웃 상류 혼잡 요약(+8dim) 추가 → "
+                        "(#3) actor obs 에 N/S 이웃 상류 혼잡 요약(+4dim) 추가 → "
                         "분산 실행 정책이 상류 수요를 미리 관측(anticipation). "
-                        "(#1) --ctde 와 함께면 critic 입력을 [own|agent_id|이웃 obs] 로 구성 → "
-                        "무관 비이웃 agent 제거. 인접/방향은 net 에서 자동 도출. "
+                        "(#1) --ctde 와 함께면 critic 입력을 [own|agent_id|N/E/S/W 이웃 obs] 로 "
+                        "구성 (actor-lean/critic-rich). 인접/방향은 net 에서 자동 도출. "
                         "주의: obs 차원이 바뀌므로 기존(미지정) 체크포인트와 호환 불가.")
+    p.add_argument("--upstream-phase", action="store_true",
+                   help="② 상류 위상 관측 — N/S 이웃의 phase one-hot + 경과시간을 actor obs 에 "
+                        "추가(+10dim) → platoon 도착 타이밍을 관측해 green wave 오프셋 학습. "
+                        "--neighbor-obs 필요. obs 차원 변경 → 기존 체크포인트와 비호환.")
+    p.add_argument("--progression-coeff", type=float, default=0.0,
+                   help="① 회랑 progression 보상 계수 β. corridor(BRT 전용차로) agent 의 "
+                        "ns-through lane 가중 평균 속도비를 β배 가산 → 무정차 통과(green wave) "
+                        "유도. 0=off. β 스케일은 reward_mode 의존(diff-waiting 1~5 / pressure 5~20, smoke 실측).")
+    p.add_argument("--brt-prog-weight", type=float, default=1.0,
+                   help="① progression 보상의 BRT(vClass=bus) 가중치. 1.0=BRT 무가중 회랑 진행파, "
+                        ">1(예 3~5)=BRT 우선 진행파(Transit Signal Priority).")
     # ── Chain training (체크포인트 이어서 학습) ──────────────────────────
     p.add_argument("--resume-from", type=str, default=None,
                    help="체크포인트 디렉터리 경로 (예: models/MAPPO_sumo_2). "
@@ -456,6 +479,9 @@ def main():
         "ctde_mode": bool(args.ctde),
         "ctde_shared_reward": (args.ctde_reward == "shared"),
         "neighbor_obs": bool(args.neighbor_obs),
+        "upstream_phase": bool(args.upstream_phase),
+        "progression_coeff": args.progression_coeff,
+        "brt_prog_weight": args.brt_prog_weight,
         "switch_penalty": args.switch_penalty,
         "brt_weight": args.brt_weight,
         "time_to_teleport": args.time_to_teleport,
@@ -676,6 +702,9 @@ def main():
         "ctde_mode":    bool(args.ctde),
         "ctde_reward":  args.ctde_reward if args.ctde else None,
         "neighbor_obs": bool(args.neighbor_obs),
+        "upstream_phase":    bool(args.upstream_phase),
+        "progression_coeff": args.progression_coeff,
+        "brt_prog_weight":   args.brt_prog_weight,
         # resume 출처 추적
         "resume_from":         args.resume_from,
         "resume_weights_only": bool(weights_only_actual) if args.resume_from else False,

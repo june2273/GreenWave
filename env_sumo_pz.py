@@ -66,11 +66,16 @@ class SumoParallelEnv(ParallelEnv):
 
     REWARD_MODES: List[str] = ["diff-waiting-time", "pressure"]
 
-    # neighbor_obs 확장에서 사용하는 고정 방향 슬롯. shared policy 가 슬롯 순서를
-    # 일관된 의미(북/동/남/서 이웃)로 학습하도록 항상 이 순서로 채운다.
+    # CTDE critic wrap 의 고정 이웃 슬롯 (4방향). critic 은 N/E/S/W 이웃 obs 를 모두
+    # 받아 value 추정에 활용한다 (actor 는 N/S 만 봄 — _OBS_NBR_DIRS 참조).
     _NEIGHBOR_DIRS: Tuple[str, ...] = ("N", "E", "S", "W")
-    # 이웃 한 칸당 요약 스칼라 수 (mean_density, mean_queue).
+    # per-agent actor obs 가 방출하는 이웃 방향. 회랑(green wave)은 N/S 축이고 E/W=cross-
+    # column 은 진행파에 무관 + 혼잡은 pressure 와 중복이라 컷 → 배포 actor obs 를 lean 하게.
+    _OBS_NBR_DIRS: Tuple[str, ...] = ("N", "S")
+    # 이웃 한 칸당 혼잡 요약 스칼라 수 (mean_density, mean_queue).
     _NBR_SUMMARY_DIM: int = 2
+    # upstream_phase: 이웃 phase 경과시간 정규화 분모(초). 최대 green ~47s, cycle ~100s.
+    _PHASE_TIME_NORM: float = 60.0
 
     def __init__(
         self,
@@ -85,6 +90,9 @@ class SumoParallelEnv(ParallelEnv):
         ctde_mode: bool = False,
         ctde_shared_reward: bool = False,
         neighbor_obs: bool = False,
+        upstream_phase: bool = False,
+        progression_coeff: float = 0.0,
+        brt_prog_weight: float = 1.0,
         switch_penalty: float = 0.45,
         brt_weight: float = 1.0,
         time_to_teleport: int = 300,
@@ -117,14 +125,25 @@ class SumoParallelEnv(ParallelEnv):
         self.ctde_shared_reward = bool(ctde_shared_reward)
         # Topology-aware 관측/critic 확장 (기본 False = 기존 동작 그대로).
         #   neighbor_obs=True 면:
-        #   - (#3) 각 agent local obs 끝에 N/E/S/W 이웃 교차로의 상류 혼잡 요약
-        #          [mean_density, mean_queue] × 4방향 = 8 차원을 덧붙여, 분산 실행되는
+        #   - (#3) 각 agent actor obs 끝에 N/S 이웃 교차로의 상류 혼잡 요약
+        #          [mean_density, mean_queue] × 2방향 = 4 차원을 덧붙여, 분산 실행되는
         #          actor 가 "상류에서 차량이 몰려온다"를 미리 관측(anticipation)한다.
+        #          (회랑=N/S 축. E/W=cross 는 컷 — _OBS_NBR_DIRS 참조.)
         #   - (#1) ctde_mode 일 때 critic 입력을 전체 agent naive concat 대신
-        #          [own | agent_id one-hot | N/E/S/W 이웃 obs] 로 구성해, 무관한
-        #          비이웃 agent 의 정보를 제거하고 방향성·정체성을 부여한다.
+        #          [own | agent_id one-hot | N/E/S/W 이웃 obs] 로 구성 (critic 은 4방향
+        #          이웃 obs 까지 봐 value 추정이 풍부; actor 는 N/S 만 — actor-lean/critic-rich).
         # 인접/방향은 _probe_network_spec 에서 net 연결성으로 자동 도출 (하드코딩 없음).
         self.neighbor_obs = bool(neighbor_obs)
+        # upstream_phase: neighbor_obs 위에 N/S 이웃의 위상 시계(phase one-hot + 경과시간)를
+        # actor obs 에 추가 → 상류 platoon 도착 타이밍을 관측해 green wave 오프셋을 학습.
+        # neighbor_obs 스캐폴딩(인접맵·2-pass·critic wrap)을 요구한다.
+        self.upstream_phase = bool(upstream_phase)
+        if self.upstream_phase and not self.neighbor_obs:
+            raise ValueError("upstream_phase=True 는 neighbor_obs=True 를 요구합니다.")
+        # ① 회랑 progression 보상: corridor agent 의 ns-through lane 가중 평균 속도비를
+        # progression_coeff 배 가산 (무정차 통과 = green wave). brt_prog_weight>1 면 버스 우대(TSP).
+        self.progression_coeff = float(progression_coeff)
+        self.brt_prog_weight = float(brt_prog_weight)
         # Phase switch마다 차감해 oscillation을 억제 (모든 reward_mode 공통).
         # 기본 0.45 ≈ yellow 3초 × 1대/초 손실. 튜닝 근거는 CLAUDE.md 참조.
         self.switch_penalty = float(switch_penalty)
@@ -173,9 +192,16 @@ class SumoParallelEnv(ParallelEnv):
         )
         # base local obs: [phase_one_hot, min_green_flag, density, queue]
         self._base_obs_dim: int = self._num_green + 1 + 2 * self._num_lanes
-        # neighbor_obs 면 N/E/S/W 이웃 요약(_NBR_SUMMARY_DIM × 4) 을 덧붙인다.
+        # upstream_phase 의 이웃 위상 슬롯 차원 = phase_one_hot(num_green) + elapsed_norm(1).
+        self._phase_slot_dim: int = self._num_green + 1
+        # actor obs 의 이웃 블록: N/S 각 방향당 [혼잡 요약(2)] (+ upstream_phase 면 위상 슬롯).
+        #   neighbor_obs only : 2방향 × 2          = 4
+        #   + upstream_phase  : 2방향 × (2 + num_green+1) = 14 (3x2-brt: 4+10)
+        per_dir_block = self._NBR_SUMMARY_DIM + (
+            self._phase_slot_dim if self.upstream_phase else 0
+        )
         self._nbr_summary_dim: int = (
-            self._NBR_SUMMARY_DIM * len(self._NEIGHBOR_DIRS) if self.neighbor_obs else 0
+            len(self._OBS_NBR_DIRS) * per_dir_block if self.neighbor_obs else 0
         )
         # _obs_dim = actor 가 보는 per-agent local 차원 (= CTDE module 의 local_dim).
         self._obs_dim: int = self._base_obs_dim + self._nbr_summary_dim
@@ -188,6 +214,16 @@ class SumoParallelEnv(ParallelEnv):
             a: np.zeros(self._NBR_SUMMARY_DIM, dtype=np.float32)
             for a in self.possible_agents
         }
+        # upstream_phase 위상 시계 캐시 — _compute_obs 가 [phase_one_hot, elapsed_norm] 를 채움.
+        self._agent_phase_summary: Dict[str, np.ndarray] = {
+            a: np.zeros(self._phase_slot_dim, dtype=np.float32)
+            for a in self.possible_agents
+        }
+
+        # ① 회랑(BRT corridor) 자동식별 — BRT 전용차로를 controlled lane 으로 가진 agent.
+        # corridor_ns_lanes = 그 agent 의 ns-through lane(진행 보상 대상, BRT 전용차로 포함).
+        self._corridor_agents: List[str] = spec["corridor_agents"]
+        self._corridor_ns_lanes: Dict[str, List[str]] = spec["corridor_ns_lanes"]
 
         # agents: 현재 에피소드 활성 에이전트
         self.agents: List[str] = []
@@ -269,6 +305,11 @@ class SumoParallelEnv(ParallelEnv):
         self._episode_brt_speed_count: int = 0
         self._episode_car_speed_sum: float = 0.0
         self._episode_car_speed_count: int = 0
+
+        # ① 회랑 진행파 지표 — corridor ns-through lane BRT 평균 속도비 (progression_coeff
+        # 와 무관하게 항상 누적; baseline 대비 진행파 정량 비교용). _corridor_step 가 채움.
+        self._episode_corridor_brt_ratio_sum: float = 0.0
+        self._episode_corridor_brt_count: int = 0
 
         # 네트워크 시각화 렌더러
         self._renderer = SumoRenderer(self.sumo_cfg)
@@ -371,6 +412,46 @@ class SumoParallelEnv(ParallelEnv):
         abs_a = abs(math.degrees(math.atan2(dy, dx)))
         return "ew" if (abs_a <= 45 or abs_a >= 135) else "ns"
 
+    @staticmethod
+    def _is_brt_lane(conn, ln: str) -> bool:
+        """lane 이 BRT 전용차로인지 — allow 에 bus 포함 & passenger 제외.
+
+        BRT corridor edge 의 전용차로(allow="bus")를 식별해 회랑 agent 를 자동 도출한다
+        (하드코딩 없음). getAllowed 가 빈 리스트면 전체 허용(=일반차로) → False.
+        """
+        try:
+            allowed = set(conn.lane.getAllowed(ln))
+        except Exception:
+            return False
+        return ("bus" in allowed) and ("passenger" not in allowed)
+
+    def _corridor_step(self, agent: str) -> float:
+        """① corridor agent 의 ns-through lane 가중 평균 속도비 ∈ [0, brt_prog_weight].
+
+        버스가 자유속도로 통과하면 ↑, 정지하면 0 → 무정차(green wave) 유도.
+        brt_prog_weight>1 이면 버스 우대(TSP). 회랑 차량 없으면 0.
+        분모 정규화로 차량 수 무관·bounded → β 튜닝 안정.
+
+        같은 1-pass 로 BRT-only 속도비 metric 도 누적한다 (progression_coeff 와 무관하게
+        항상 기록 → baseline 대비 회랑 진행파 정량 비교용 corridor_brt_speed_ratio).
+        """
+        num = 0.0
+        den = 0.0
+        for ln in self._corridor_ns_lanes.get(agent, []):
+            vmax = self.conn.lane.getMaxSpeed(ln)
+            if vmax <= 1e-6:
+                continue
+            for vid in self.conn.lane.getLastStepVehicleIDs(ln):
+                is_bus = self.conn.vehicle.getVehicleClass(vid) == "bus"
+                ratio = min(1.0, self.conn.vehicle.getSpeed(vid) / vmax)
+                w = self.brt_prog_weight if is_bus else 1.0
+                num += w * ratio
+                den += w
+                if is_bus:
+                    self._episode_corridor_brt_ratio_sum += ratio
+                    self._episode_corridor_brt_count += 1
+        return num / den if den > 0.0 else 0.0
+
     # ------------------------------------------------------------------
     # SUMO 유틸리티
     # ------------------------------------------------------------------
@@ -454,6 +535,8 @@ class SumoParallelEnv(ParallelEnv):
             per_agent_yellow_map: Dict[str, Dict[int, int]] = {}
             lane_capacities: Dict[str, float] = {}
             lane_direction: Dict[str, str] = {}
+            # ① 회랑 식별: BRT 전용차로(allow=bus, passenger 차단)를 가진 agent + 그 ns-through lane.
+            corridor_ns_lanes: Dict[str, List[str]] = {}
 
             for agent, tls_id in zip(self.possible_agents, self._tls_ids):
                 lanes = list(dict.fromkeys(
@@ -481,6 +564,13 @@ class SumoParallelEnv(ParallelEnv):
                             )
                         except Exception:
                             lane_direction[ln] = "ew"
+
+                # ① 회랑 식별: BRT 전용차로를 가진 agent 의 ns-through lane 집합.
+                # 전용차로 ⟺ allow 에 bus 포함 & passenger 제외 (BRT corridor edge).
+                if any(self._is_brt_lane(conn, ln) for ln in lanes):
+                    corridor_ns_lanes[agent] = [
+                        ln for ln in lanes if lane_direction.get(ln) == "ns"
+                    ]
 
                 # green phase 인덱스 + green→다음yellow 매핑
                 green_indices, yellow_map = self._extract_phase_structure(conn, tls_id)
@@ -515,6 +605,8 @@ class SumoParallelEnv(ParallelEnv):
                 "lane_capacities": lane_capacities,
                 "lane_direction": lane_direction,
                 "neighbor_dir": neighbor_dir,
+                "corridor_agents": list(corridor_ns_lanes.keys()),
+                "corridor_ns_lanes": corridor_ns_lanes,
             }
         finally:
             if conn is not None:
@@ -852,6 +944,12 @@ class SumoParallelEnv(ParallelEnv):
                  float(queue.mean()) if queue.size else 0.0],
                 dtype=np.float32,
             )
+            # upstream_phase: 이웃이 읽을 위상 시계 [phase_one_hot, elapsed_norm].
+            if self.upstream_phase:
+                ps = np.zeros(self._phase_slot_dim, dtype=np.float32)
+                ps[green_idx] = 1.0
+                ps[-1] = min(1.0, self._elapsed_phase_time[agent] / self._PHASE_TIME_NORM)
+                self._agent_phase_summary[agent] = ps
 
         # mixed-topology (BRT corridor TLS vs 일반 TLS) 시 agent별 lane 수가 다름.
         # shape 일관성 위해 max(_num_lanes) 까지 0 패딩.
@@ -871,25 +969,29 @@ class SumoParallelEnv(ParallelEnv):
     def _enrich_obs(
         self, local_obs: Dict[str, np.ndarray]
     ) -> Dict[str, np.ndarray]:
-        """(#3) neighbor_obs 면 각 agent local obs 끝에 N/E/S/W 이웃 상류 요약을 덧붙인다.
+        """neighbor_obs 면 각 agent actor obs 끝에 N/S 이웃 상류 요약을 덧붙인다.
 
-        이웃 요약 = 그 이웃의 [mean_density, mean_queue] (직전 _compute_obs 가 채운
-        _agent_dq_summary 캐시). 없는 방향은 0. 결과 길이 = _base_obs_dim + 8 = _obs_dim.
-        분산 실행 시 actor 가 이 슬롯으로 "상류에서 차량이 몰려온다"를 미리 관측한다.
-        2-pass 인 이유: 이웃 요약은 다른 agent 의 obs 계산 결과를 참조하므로, 모든 agent
-        의 _compute_obs 가 끝난 뒤에야 안전하게 조립할 수 있다.
+        방향당 블록 = [mean_density, mean_queue] (혼잡, #3) + (upstream_phase 면)
+        [phase_one_hot, elapsed_norm] (위상 시계, ②). 직전 _compute_obs 가 채운
+        _agent_dq_summary / _agent_phase_summary 캐시를 읽는다. 없는 방향은 0.
+        방출 방향은 _OBS_NBR_DIRS=(N,S) — 회랑(green wave)은 N/S 축이라 E/W 는 컷.
+        결과 길이 = _obs_dim (29 또는 39). 2-pass 인 이유: 이웃 요약은 다른 agent 의 obs
+        계산 결과를 참조하므로 모든 _compute_obs 가 끝난 뒤에야 안전히 조립 가능.
         """
         if not self.neighbor_obs:
             return local_obs
         zero2 = np.zeros(self._NBR_SUMMARY_DIM, dtype=np.float32)
+        zero_ps = np.zeros(self._phase_slot_dim, dtype=np.float32)
         enriched: Dict[str, np.ndarray] = {}
         for a, base in local_obs.items():
             dirs = self._neighbor_dir.get(a, {})
-            summary = [
-                self._agent_dq_summary.get(dirs[d], zero2) if d in dirs else zero2
-                for d in self._NEIGHBOR_DIRS
-            ]
-            obs = np.concatenate([base, *summary]).astype(np.float32)
+            parts = [base]
+            for d in self._OBS_NBR_DIRS:
+                nbr = dirs.get(d)
+                parts.append(self._agent_dq_summary.get(nbr, zero2) if nbr else zero2)
+                if self.upstream_phase:
+                    parts.append(self._agent_phase_summary.get(nbr, zero_ps) if nbr else zero_ps)
+            obs = np.concatenate(parts).astype(np.float32)
             enriched[a] = obs
             self._last_obs[a] = obs  # 결측 agent fallback 용 (enriched 길이로 갱신)
         return enriched
@@ -990,6 +1092,8 @@ class SumoParallelEnv(ParallelEnv):
         self._episode_brt_speed_count = 0
         self._episode_car_speed_sum = 0.0
         self._episode_car_speed_count = 0
+        self._episode_corridor_brt_ratio_sum = 0.0
+        self._episode_corridor_brt_count = 0
 
         # 초기 phase: 각 agent의 green_phases[0] 으로 강제 설정 (자동 cycle 차단)
         for agent in self.agents:
@@ -1115,6 +1219,14 @@ class SumoParallelEnv(ParallelEnv):
             if switching[agent] and self.switch_penalty != 0.0:
                 reward -= self.switch_penalty
 
+            # ① 회랑 progression: corridor agent 의 ns-through lane 무정차 통과를 가산
+            # (dense 가중 평균 속도비). green wave 유도. metric 은 항상 누적, reward 가산은
+            # progression_coeff != 0 일 때만. 비-corridor agent 는 no-op.
+            if agent in self._corridor_agents:
+                r_prog = self._corridor_step(agent)
+                if self.progression_coeff != 0.0:
+                    reward += self.progression_coeff * r_prog
+
             rewards[agent] = reward
             terminations[agent] = False
             truncations[agent] = done
@@ -1155,6 +1267,11 @@ class SumoParallelEnv(ParallelEnv):
         avg_speed_car = (
             self._episode_car_speed_sum / self._episode_car_speed_count
             if self._episode_car_speed_count > 0 else 0.0
+        )
+        # ① 회랑 진행파 — corridor ns-through lane BRT 평균 속도비 ∈ [0,1] (높을수록 무정차).
+        corridor_brt_speed_ratio = (
+            self._episode_corridor_brt_ratio_sum / self._episode_corridor_brt_count
+            if self._episode_corridor_brt_count > 0 else 0.0
         )
 
         # CTDE 공유 보상 — 모든 agent 가 동일한 mean(reward) 받음
@@ -1208,6 +1325,9 @@ class SumoParallelEnv(ParallelEnv):
                 "avg_speed_car": float(avg_speed_car),
                 "brt_seen":      int(self._episode_brt_wait_count),
                 "car_seen":      int(self._episode_car_wait_count),
+                # ① 회랑 진행파 직접 지표 (corridor ns-through BRT 평균 속도비).
+                "corridor_brt_speed_ratio": float(corridor_brt_speed_ratio),
+                "corridor_brt_seen":        int(self._episode_corridor_brt_count),
             }
 
         local_obs = self._enrich_obs(local_obs)
