@@ -66,6 +66,12 @@ class SumoParallelEnv(ParallelEnv):
 
     REWARD_MODES: List[str] = ["diff-waiting-time", "pressure"]
 
+    # neighbor_obs 확장에서 사용하는 고정 방향 슬롯. shared policy 가 슬롯 순서를
+    # 일관된 의미(북/동/남/서 이웃)로 학습하도록 항상 이 순서로 채운다.
+    _NEIGHBOR_DIRS: Tuple[str, ...] = ("N", "E", "S", "W")
+    # 이웃 한 칸당 요약 스칼라 수 (mean_density, mean_queue).
+    _NBR_SUMMARY_DIM: int = 2
+
     def __init__(
         self,
         sumo_cfg: Optional[str] = None,
@@ -78,6 +84,7 @@ class SumoParallelEnv(ParallelEnv):
         tls_ids: Optional[List[str]] = None,
         ctde_mode: bool = False,
         ctde_shared_reward: bool = False,
+        neighbor_obs: bool = False,
         switch_penalty: float = 0.45,
         brt_weight: float = 1.0,
         time_to_teleport: int = 300,
@@ -108,6 +115,16 @@ class SumoParallelEnv(ParallelEnv):
         self.reward_mode = reward_mode
         self.ctde_mode = bool(ctde_mode)
         self.ctde_shared_reward = bool(ctde_shared_reward)
+        # Topology-aware 관측/critic 확장 (기본 False = 기존 동작 그대로).
+        #   neighbor_obs=True 면:
+        #   - (#3) 각 agent local obs 끝에 N/E/S/W 이웃 교차로의 상류 혼잡 요약
+        #          [mean_density, mean_queue] × 4방향 = 8 차원을 덧붙여, 분산 실행되는
+        #          actor 가 "상류에서 차량이 몰려온다"를 미리 관측(anticipation)한다.
+        #   - (#1) ctde_mode 일 때 critic 입력을 전체 agent naive concat 대신
+        #          [own | agent_id one-hot | N/E/S/W 이웃 obs] 로 구성해, 무관한
+        #          비이웃 agent 의 정보를 제거하고 방향성·정체성을 부여한다.
+        # 인접/방향은 _probe_network_spec 에서 net 연결성으로 자동 도출 (하드코딩 없음).
+        self.neighbor_obs = bool(neighbor_obs)
         # Phase switch마다 차감해 oscillation을 억제 (모든 reward_mode 공통).
         # 기본 0.45 ≈ yellow 3초 × 1대/초 손실. 튜닝 근거는 CLAUDE.md 참조.
         self.switch_penalty = float(switch_penalty)
@@ -154,7 +171,23 @@ class SumoParallelEnv(ParallelEnv):
         self._num_lanes: int = max(
             len(self._per_agent_lanes[a]) for a in self.possible_agents
         )
-        self._obs_dim: int = self._num_green + 1 + 2 * self._num_lanes
+        # base local obs: [phase_one_hot, min_green_flag, density, queue]
+        self._base_obs_dim: int = self._num_green + 1 + 2 * self._num_lanes
+        # neighbor_obs 면 N/E/S/W 이웃 요약(_NBR_SUMMARY_DIM × 4) 을 덧붙인다.
+        self._nbr_summary_dim: int = (
+            self._NBR_SUMMARY_DIM * len(self._NEIGHBOR_DIRS) if self.neighbor_obs else 0
+        )
+        # _obs_dim = actor 가 보는 per-agent local 차원 (= CTDE module 의 local_dim).
+        self._obs_dim: int = self._base_obs_dim + self._nbr_summary_dim
+
+        # 인접/방향 맵 (net 연결성 기반 자동 도출). neighbor_obs=False 여도 보관만 함.
+        self._neighbor_dir: Dict[str, Dict[str, str]] = spec["neighbor_dir"]
+        # 이웃 요약 캐시 — _compute_obs 가 agent 별 [mean_density, mean_queue] 를 채우고
+        # _enrich_obs 가 이웃 것을 읽어 붙인다 (2-pass).
+        self._agent_dq_summary: Dict[str, np.ndarray] = {
+            a: np.zeros(self._NBR_SUMMARY_DIM, dtype=np.float32)
+            for a in self.possible_agents
+        }
 
         # agents: 현재 에피소드 활성 에이전트
         self.agents: List[str] = []
@@ -302,12 +335,15 @@ class SumoParallelEnv(ParallelEnv):
                 low=0.0, high=1.0,
                 shape=(self._obs_dim,), dtype=np.float32,
             )
-        # CTDE: 단일 Box 로 평탄화 — [local | global(N agents concat)]
-        # Dict obs 는 RLlib worker process 의 connector pipeline 에서 silent fail
-        # → 항상 Box 로 직렬화하고 RLModule 이 forward 시 slice (CTDE_LOCAL_DIM 사용).
-        # 첫 _obs_dim 차원 = 자기 local. 뒤 _obs_dim × N 차원 = 모든 agent local concat.
+        # CTDE: 단일 flat Box (Dict obs 는 RLlib worker connector 에서 silent fail).
+        # 첫 _obs_dim 차원 = 자기 local → CentralizedCriticPPOModule 이 slice.
         n_agents = len(self.possible_agents)
-        total_dim = self._obs_dim + self._obs_dim * n_agents
+        if self.neighbor_obs:
+            # (#1) [own | agent_id one-hot(N) | N/E/S/W 이웃 obs(_obs_dim × 4)]
+            total_dim = self._obs_dim + n_agents + self._obs_dim * len(self._NEIGHBOR_DIRS)
+        else:
+            # legacy: [own | 전체 agent obs concat(_obs_dim × N)]
+            total_dim = self._obs_dim + self._obs_dim * n_agents
         return spaces.Box(
             low=0.0, high=1.0,
             shape=(total_dim,), dtype=np.float32,
@@ -461,6 +497,16 @@ class SumoParallelEnv(ParallelEnv):
                         "현재 구현은 동일 구조 교차로만 지원합니다."
                     )
 
+            # ── 인접·방향 자동 도출 (neighbor_obs 확장용) ─────────────────────
+            # 하드코딩 없이 net 연결성으로 계산:
+            #   A→B 연결 ⟺ A 의 out-lane 이 B 의 controlled in-lane 과 겹침
+            #   (같은 edge 의 lane id 는 A 의 out 이자 B 의 in). 양방향 합집합으로
+            #   무방향 이웃 집합을 만든 뒤, 교차로 위치 상대좌표로 N/E/S/W 분류.
+            agent_pos = self._probe_agent_positions(conn, per_agent_lanes)
+            neighbor_dir = self._derive_neighbor_dirs(
+                per_agent_lanes, per_agent_out_lanes, agent_pos
+            )
+
             return {
                 "per_agent_lanes": per_agent_lanes,
                 "per_agent_out_lanes": per_agent_out_lanes,
@@ -468,6 +514,7 @@ class SumoParallelEnv(ParallelEnv):
                 "per_agent_yellow_map": per_agent_yellow_map,
                 "lane_capacities": lane_capacities,
                 "lane_direction": lane_direction,
+                "neighbor_dir": neighbor_dir,
             }
         finally:
             if conn is not None:
@@ -475,6 +522,82 @@ class SumoParallelEnv(ParallelEnv):
                     conn.close()
                 except Exception:
                     pass
+
+    def _probe_agent_positions(
+        self, conn, per_agent_lanes: Dict[str, List[str]]
+    ) -> Dict[str, Tuple[float, float]]:
+        """각 agent(교차로)의 대표 (x, y) 좌표를 추정.
+
+        우선 junction.getPosition(tls_id) 을 시도하고, 실패하면 controlled in-lane
+        의 junction-쪽 끝점(getShape()[-1]) 평균으로 대체한다. 방향(N/E/S/W) 분류에만
+        쓰이므로 정확한 절대좌표가 아니라 상대 배치만 맞으면 충분하다.
+        """
+        agent_pos: Dict[str, Tuple[float, float]] = {}
+        for agent, tls_id in zip(self.possible_agents, self._tls_ids):
+            pos: Optional[Tuple[float, float]] = None
+            try:
+                p = conn.junction.getPosition(tls_id)
+                pos = (float(p[0]), float(p[1]))
+            except Exception:
+                pos = None
+            if pos is None:
+                ends = []
+                for ln in per_agent_lanes.get(agent, []):
+                    try:
+                        shape = conn.lane.getShape(ln)
+                        if shape:
+                            ends.append((float(shape[-1][0]), float(shape[-1][1])))
+                    except Exception:
+                        continue
+                if ends:
+                    pos = (
+                        sum(x for x, _ in ends) / len(ends),
+                        sum(y for _, y in ends) / len(ends),
+                    )
+                else:
+                    pos = (0.0, 0.0)
+            agent_pos[agent] = pos
+        return agent_pos
+
+    def _derive_neighbor_dirs(
+        self,
+        per_agent_lanes: Dict[str, List[str]],
+        per_agent_out_lanes: Dict[str, List[str]],
+        agent_pos: Dict[str, Tuple[float, float]],
+    ) -> Dict[str, Dict[str, str]]:
+        """net 연결성 + 상대좌표로 agent 별 {방향: 이웃agent} 맵을 만든다.
+
+        - 인접 판정: A 의 out-lane 집합과 B 의 in-lane 집합이 겹치면 A→B 연결.
+          grid 는 양방향 edge 라 보통 대칭이지만, 한쪽만 잡혀도 무방향 이웃으로 본다.
+        - 방향: (B - A) 벡터의 우세 축으로 N/E/S/W 1개 배정 (SUMO y 증가 = 북).
+          같은 방향에 둘이 잡히면 더 가까운 쪽을 채택.
+        """
+        in_set = {a: set(per_agent_lanes.get(a, [])) for a in self.possible_agents}
+        out_set = {a: set(per_agent_out_lanes.get(a, [])) for a in self.possible_agents}
+
+        neighbor_dir: Dict[str, Dict[str, str]] = {
+            a: {} for a in self.possible_agents
+        }
+        for a in self.possible_agents:
+            ax, ay = agent_pos[a]
+            best_dist: Dict[str, float] = {}
+            for b in self.possible_agents:
+                if b == a:
+                    continue
+                connected = bool(out_set[a] & in_set[b]) or bool(out_set[b] & in_set[a])
+                if not connected:
+                    continue
+                bx, by = agent_pos[b]
+                dx, dy = bx - ax, by - ay
+                if abs(dx) >= abs(dy):
+                    direction = "E" if dx > 0 else "W"
+                else:
+                    direction = "N" if dy > 0 else "S"
+                dist = dx * dx + dy * dy
+                if direction not in best_dist or dist < best_dist[direction]:
+                    best_dist[direction] = dist
+                    neighbor_dir[a][direction] = b
+        return neighbor_dir
 
     @staticmethod
     def _extract_phase_structure(conn, tls_id: str) -> Tuple[List[int], Dict[int, int]]:
@@ -722,6 +845,14 @@ class SumoParallelEnv(ParallelEnv):
             for ln, q in zip(lanes, raw_queue)
         ], dtype=np.float32)
 
+        # 이웃 요약 캐시: 실제 lane(패딩 전) 평균 density/queue. _enrich_obs 가 읽는다.
+        if self.neighbor_obs:
+            self._agent_dq_summary[agent] = np.array(
+                [float(density.mean()) if density.size else 0.0,
+                 float(queue.mean()) if queue.size else 0.0],
+                dtype=np.float32,
+            )
+
         # mixed-topology (BRT corridor TLS vs 일반 TLS) 시 agent별 lane 수가 다름.
         # shape 일관성 위해 max(_num_lanes) 까지 0 패딩.
         pad = self._num_lanes - len(lanes)
@@ -737,20 +868,69 @@ class SumoParallelEnv(ParallelEnv):
     # PettingZoo Parallel API
     # ------------------------------------------------------------------
 
-    def _wrap_obs(self, local_obs: Dict[str, np.ndarray]) -> Dict[str, np.ndarray]:
-        """ctde_mode 면 per-agent obs 를 [local | global_concat] 단일 Box 로 평탄화.
+    def _enrich_obs(
+        self, local_obs: Dict[str, np.ndarray]
+    ) -> Dict[str, np.ndarray]:
+        """(#3) neighbor_obs 면 각 agent local obs 끝에 N/E/S/W 이웃 상류 요약을 덧붙인다.
 
-        - global concat 순서는 항상 `possible_agents` 기준 (stable). `self.agents` 는
-          에피소드 종료 시 빈 리스트로 mutate 되므로 사용 금지.
-        - 결측 agent 는 0 벡터로 채워 shape 고정.
-        - Dict obs 대신 평탄화하는 이유: RLlib worker process 의 connector pipeline
-          에서 Dict subspace 처리가 silent failure → total_steps=0. Box 면 안전.
-        - 첫 _obs_dim 차원 = agent 자기 local. 뒤 _obs_dim × N 차원 = 모든 agent
-          local concat. CentralizedCriticPPOModule 이 forward 시 slice.
+        이웃 요약 = 그 이웃의 [mean_density, mean_queue] (직전 _compute_obs 가 채운
+        _agent_dq_summary 캐시). 없는 방향은 0. 결과 길이 = _base_obs_dim + 8 = _obs_dim.
+        분산 실행 시 actor 가 이 슬롯으로 "상류에서 차량이 몰려온다"를 미리 관측한다.
+        2-pass 인 이유: 이웃 요약은 다른 agent 의 obs 계산 결과를 참조하므로, 모든 agent
+        의 _compute_obs 가 끝난 뒤에야 안전하게 조립할 수 있다.
+        """
+        if not self.neighbor_obs:
+            return local_obs
+        zero2 = np.zeros(self._NBR_SUMMARY_DIM, dtype=np.float32)
+        enriched: Dict[str, np.ndarray] = {}
+        for a, base in local_obs.items():
+            dirs = self._neighbor_dir.get(a, {})
+            summary = [
+                self._agent_dq_summary.get(dirs[d], zero2) if d in dirs else zero2
+                for d in self._NEIGHBOR_DIRS
+            ]
+            obs = np.concatenate([base, *summary]).astype(np.float32)
+            enriched[a] = obs
+            self._last_obs[a] = obs  # 결측 agent fallback 용 (enriched 길이로 갱신)
+        return enriched
+
+    def _wrap_obs(self, local_obs: Dict[str, np.ndarray]) -> Dict[str, np.ndarray]:
+        """ctde_mode 면 per-agent obs 를 단일 flat Box 로 평탄화 (critic 입력).
+
+        두 가지 critic 레이아웃 (둘 다 첫 _obs_dim 차원 = 자기 local → module 이 slice):
+        - neighbor_obs=True  (#1): [own | agent_id one-hot(N) | N/E/S/W 이웃 obs(_obs_dim)]
+              무관한 비이웃 agent 를 빼고 방향성·정체성을 부여한 agent-aware critic.
+              없는 방향 이웃은 0 패딩.
+        - neighbor_obs=False (legacy): [own | 전체 agent obs concat(_obs_dim × N)]
+              기존 naive 방식 (옛 체크포인트 재현용).
+
+        concat 순서는 항상 `possible_agents` 기준 (stable). `self.agents` 는 에피소드
+        종료 시 빈 리스트로 mutate 되므로 사용 금지. 결측 agent 는 0 벡터로 채운다.
+        (Dict obs 는 RLlib worker connector 에서 silent fail → 항상 flat Box.)
         """
         if not self.ctde_mode:
             return local_obs
         zero = np.zeros(self._obs_dim, dtype=np.float32)
+
+        if self.neighbor_obs:
+            n_agents = len(self.possible_agents)
+            out: Dict[str, np.ndarray] = {}
+            for a in local_obs:
+                idx = self.possible_agents.index(a)
+                agent_id = np.zeros(n_agents, dtype=np.float32)
+                agent_id[idx] = 1.0
+                parts = [local_obs[a], agent_id]
+                dirs = self._neighbor_dir.get(a, {})
+                for d in self._NEIGHBOR_DIRS:
+                    nbr = dirs.get(d)
+                    if nbr is not None:
+                        parts.append(local_obs.get(nbr, self._last_obs.get(nbr, zero)))
+                    else:
+                        parts.append(zero)
+                out[a] = np.concatenate(parts).astype(np.float32)
+            return out
+
+        # legacy: 전체 agent naive concat
         global_vec = np.concatenate([
             local_obs.get(a, self._last_obs.get(a, zero))
             for a in self.possible_agents
@@ -820,6 +1000,7 @@ class SumoParallelEnv(ParallelEnv):
             self._set_phase_locked(self._agent_to_tls[agent], initial_phase)
 
         local_obs = {a: self._compute_obs(a) for a in self.agents}
+        local_obs = self._enrich_obs(local_obs)
         observations = self._wrap_obs(local_obs)
         infos = {a: {"phase": self._current_phase[a]} for a in self.agents}
         return observations, infos
@@ -1029,6 +1210,7 @@ class SumoParallelEnv(ParallelEnv):
                 "car_seen":      int(self._episode_car_wait_count),
             }
 
+        local_obs = self._enrich_obs(local_obs)
         observations = self._wrap_obs(local_obs)
 
         if done:

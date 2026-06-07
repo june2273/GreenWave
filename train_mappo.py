@@ -240,7 +240,7 @@ def _load_resume_metadata(resume_path: str) -> dict:
 def _validate_resume_compat(prev_meta: dict, args) -> None:
     """resume 시 변경 불가능한 설정 충돌 검출.
 
-    - ctde_mode 변경은 architecture 차이로 거부 (actor-critic 구조 자체 다름)
+    - ctde_mode / neighbor_obs 변경은 obs·architecture 차이로 거부
     - map 변경은 transfer learning 으로 경고만 (obs shape 호환 시 진행)
     """
     if not prev_meta:
@@ -252,6 +252,13 @@ def _validate_resume_compat(prev_meta: dict, args) -> None:
             f"[resume] ctde_mode 변경 불가: 이전={prev_ctde}, 현재={new_ctde}. "
             f"CTDE↔MAPPO 전환은 architecture 가 달라 weights 호환 불가. "
             f"새 학습으로 진행하세요 (--resume-from 빼기)."
+        )
+    prev_nb = bool(prev_meta.get("neighbor_obs", False))
+    new_nb  = bool(args.neighbor_obs)
+    if prev_nb != new_nb:
+        raise ValueError(
+            f"[resume] neighbor_obs 변경 불가: 이전={prev_nb}, 현재={new_nb}. "
+            f"obs 차원이 달라 weights 호환 불가. 새 학습으로 진행하세요."
         )
     prev_map = prev_meta.get("map")
     if prev_map and prev_map != args.map:
@@ -310,7 +317,9 @@ def parse_args():
     p.add_argument("--num-workers", type=int, default=1,
                    help="RLlib rollout worker 수 (SUMO 병렬 인스턴스 수)")
     p.add_argument("--out", type=str, default=None,
-                   help="저장 경로 (미지정 시 models/MAPPO_sumo_N 자동 버전 생성)")
+                   help="저장 경로 (미지정 시 models/MAPPO_sumo_N 자동 버전 생성). "
+                        "bare name(예: CTDE_sejong_nb)은 자동으로 models/ 아래 저장; "
+                        "경로 구분자/절대경로는 그대로 사용.")
     p.add_argument("--checkpoint-freq", type=int, default=20,
                    help="중간 체크포인트 저장 주기 (iter 단위)")
     p.add_argument("--max-steps", type=int, default=3600)
@@ -368,6 +377,13 @@ def parse_args():
                         "(N=6 에서 credit 희석 없이 학습 성공 — 검증됨). "
                         "shared: 모든 agent 가 mean(local rewards) 받음 (global coordination, "
                         "N=6/LOS D+ 에서 credit 희석로 정책 동결 → 비권장, 재현용으로만).")
+    p.add_argument("--neighbor-obs", action="store_true",
+                   help="Topology-aware 관측/critic 확장 활성화. "
+                        "(#3) actor obs 에 N/E/S/W 이웃 상류 혼잡 요약(+8dim) 추가 → "
+                        "분산 실행 정책이 상류 수요를 미리 관측(anticipation). "
+                        "(#1) --ctde 와 함께면 critic 입력을 [own|agent_id|이웃 obs] 로 구성 → "
+                        "무관 비이웃 agent 제거. 인접/방향은 net 에서 자동 도출. "
+                        "주의: obs 차원이 바뀌므로 기존(미지정) 체크포인트와 호환 불가.")
     # ── Chain training (체크포인트 이어서 학습) ──────────────────────────
     p.add_argument("--resume-from", type=str, default=None,
                    help="체크포인트 디렉터리 경로 (예: models/MAPPO_sumo_2). "
@@ -439,6 +455,7 @@ def main():
         "reward_mode": args.reward_mode,
         "ctde_mode": bool(args.ctde),
         "ctde_shared_reward": (args.ctde_reward == "shared"),
+        "neighbor_obs": bool(args.neighbor_obs),
         "switch_penalty": args.switch_penalty,
         "brt_weight": args.brt_weight,
         "time_to_teleport": args.time_to_teleport,
@@ -610,7 +627,15 @@ def main():
     #   - 새 학습: MAPPO_sumo_N / MAPPO_CTDE_sumo_N 자동 버전
     algo_prefix = "MAPPO_CTDE" if args.ctde else "MAPPO"
     if args.out:
-        out_path = str(Path(args.out).resolve())
+        # bare name(디렉터리 성분 없음)이면 models/ 아래로 — resolve()가 cwd(repo-root)
+        # 기준으로 풀어 repo-root 에 체크포인트가 떨어지는 footgun 방지. 경로 구분자나
+        # 절대경로가 들어오면(예: models/X, ./X, /abs/X) 사용자 의도 그대로 둔다.
+        out_arg = args.out
+        has_sep = (os.sep in out_arg) or bool(os.altsep and os.altsep in out_arg)
+        if not Path(out_arg).is_absolute() and not has_sep:
+            out_arg = str(Path("models") / out_arg)
+            print(f"[out] bare name '{args.out}' → '{out_arg}' (models/ 아래 저장)")
+        out_path = str(Path(out_arg).resolve())
     elif args.resume_from:
         out_path = resume_path_abs  # 덮어쓰기 (이미 절대경로)
         print(f"[resume] 저장 경로 = 원본 ({out_path}). fork 하려면 --out 명시.")
@@ -650,6 +675,7 @@ def main():
         "time_to_teleport": args.time_to_teleport,
         "ctde_mode":    bool(args.ctde),
         "ctde_reward":  args.ctde_reward if args.ctde else None,
+        "neighbor_obs": bool(args.neighbor_obs),
         # resume 출처 추적
         "resume_from":         args.resume_from,
         "resume_weights_only": bool(weights_only_actual) if args.resume_from else False,

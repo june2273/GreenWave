@@ -299,14 +299,27 @@ def main():
     if sumo_cfg_effective:
         env_kwargs["sumo_cfg"] = sumo_cfg_effective
 
+    # neighbor_obs 는 모델마다 다를 수 있어 (옛 모델=False, topology-aware 재학습=True)
+    # env_kwargs 공유가 아니라 각 모델의 train_metadata 에서 개별 로드한다. obs 벡터만
+    # 바뀌고 SUMO 동역학·routes·reward 는 동일하므로, 각 정책이 학습 때와 같은 obs 를
+    # 보게 하는 것이 공정하다 (FixedTime 은 obs 미사용 → 무관).
+    nb_mappo = bool(train_meta.get("neighbor_obs", False))
+    nb_ctde  = bool(train_meta_ctde.get("neighbor_obs", False)) if module_ctde is not None else False
+    if nb_mappo or nb_ctde:
+        print(f"[neighbor_obs] MAPPO={nb_mappo}  CTDE={nb_ctde}")
+
     rows = []
 
-    # 환경 인스턴스 — MAPPO/FixedTime 은 ctde_mode=False, CTDE 는 True (Dict obs).
+    # 환경 인스턴스 — MAPPO/FixedTime 은 ctde_mode=False, CTDE 는 True (flat Box).
     # 모든 환경이 같은 seed 로 reset 되어 SUMO 차량 수요가 동일하게 재현됨.
-    env_mappo = SumoParallelEnv(**env_kwargs, ctde_mode=False) if module is not None else None
+    env_mappo = (
+        SumoParallelEnv(**env_kwargs, ctde_mode=False, neighbor_obs=nb_mappo)
+        if module is not None else None
+    )
     env_fix   = SumoParallelEnv(**env_kwargs, ctde_mode=False)
     env_ctde = (
-        SumoParallelEnv(**env_kwargs, ctde_mode=True, ctde_shared_reward=False)
+        SumoParallelEnv(**env_kwargs, ctde_mode=True, ctde_shared_reward=False,
+                        neighbor_obs=nb_ctde)
         if module_ctde is not None else None
     )
 
@@ -549,6 +562,8 @@ def main():
         "train_total_steps": train_meta.get("train_total_steps", ""),
         "reward_mode":       reward_mode_effective,
         "ctde_reward":       train_meta_ctde.get("ctde_reward", ""),
+        "neighbor_obs":      bool(train_meta.get("neighbor_obs", False)),
+        "neighbor_obs_ctde": bool(train_meta_ctde.get("neighbor_obs", False)),
         "lr":                train_meta.get("lr", ""),
         "entropy_coeff":     train_meta.get("entropy_coeff", ""),
         "vf_clip_param":     train_meta.get("vf_clip_param", ""),

@@ -5,6 +5,7 @@ record_video.py 의 MAPPO 버전.
 SumoParallelEnv.render() 프레임을 모아 mp4 인코딩.
 """
 import argparse
+import json
 import re
 from pathlib import Path
 
@@ -160,6 +161,15 @@ def main():
     )
     if sumo_cfg_effective:
         env_kwargs["sumo_cfg"] = sumo_cfg_effective
+    # neighbor_obs 로 학습된 모델은 actor 가 enriched local obs(+이웃 요약)를 기대하므로
+    # 추론 env 도 동일하게 켜야 한다 (ctde_mode=False 라도 local obs 차원이 일치해야 함).
+    _meta_path = Path(args.model).resolve() / "train_metadata.json"
+    if _meta_path.exists():
+        try:
+            _m = json.loads(_meta_path.read_text())
+            env_kwargs["neighbor_obs"] = bool(_m.get("neighbor_obs", False))
+        except Exception:
+            pass
     env = SumoParallelEnv(**env_kwargs)
 
     # 렌더 타이틀 라벨: 체크포인트 train_metadata.json 에서 MAPPO/CTDE + iter 추출

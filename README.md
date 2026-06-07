@@ -78,6 +78,15 @@ CTDE Actor:  π_i( a_i | o_i )            ← 자기 obs만 (실행 시 동일)
 └─────────────────────────────────────────────────────────────┘
 ```
 
+#### Topology-aware 확장 (`--neighbor-obs`, 선택)
+
+기본 CTDE critic은 전체 교차로 obs를 단순 concat합니다. 6 교차로 격자에서는 서로 인접하지 않은(직접 영향이 없는) 교차로 정보까지 섞여 critic advantage 추정의 **분산이 커집니다**. `--neighbor-obs` 는 critic 입력과 actor 관측을 **위상 인식(topology-aware)** 구조로 교체합니다:
+
+- **(#1) 이웃 한정 critic** — critic 입력을 전체 concat 대신 `[own | agent_id one-hot | N/E/S/W 이웃 obs]` 로 재구성 → 무관한 비이웃 교차로 정보 제거 + 방향성 부여.
+- **(#3) 상류 incoming 관측** — 각 actor obs 끝에 N/E/S/W 이웃의 상류 혼잡 요약 `[mean_density, mean_queue] × 4` 를 추가 → 분산 실행 정책이 "상류에서 차량이 몰려온다"를 미리 관측(anticipation). critic만 보는 #1과 보완 관계.
+
+인접·방향은 네트워크 연결성(`out_lane[A] ∩ in_lane[B]`)과 교차로 상대좌표에서 **자동 도출**되어 하드코딩이 없습니다 (`single`/`2x2`/`3x2` 어느 위상에도 일반화). obs 차원이 바뀌므로(per-agent 25→33, CTDE critic concat 175→171) 미지정(`--neighbor-obs` 없이 학습한) 체크포인트와는 호환되지 않으며, `train_metadata.json` 의 `neighbor_obs` 로 추적돼 평가·녹화 시 모델별로 자동 로드됩니다.
+
 ---
 
 ## Quick Start
@@ -165,6 +174,8 @@ python evaluate_mappo.py \
 
 BRT처럼 lane 수가 혼합된 토폴로지에서는 작은 agent의 obs에 0 패딩 적용.
 
+`--neighbor-obs` 활성화 시 obs 끝에 N/E/S/W 이웃 교차로의 상류 혼잡 요약 `[mean_density, mean_queue] × 4 = +8 dim` 이 추가됩니다 (BRT 시나리오 기준 25 → 33). 위 *Topology-aware 확장* 절 참조.
+
 ### Reward
 
 `--reward-mode` 로 두 보상 함수를 선택합니다 (둘 다 phase switch마다 `switch_penalty`를 차감).
@@ -198,6 +209,7 @@ yellow_time=2 로 학습된 이전 체크포인트 재사용 시 `--switch-penal
 |------|--------|------|
 | `--map` | `single` | 시나리오 선택 (`single`/`2x2`/`2x2-brt`/`3x2`/`3x2-brt`) |
 | `--ctde` | off | Centralized critic 활성화 → `MAPPO_CTDE_sumo_N/` 에 저장 |
+| `--neighbor-obs` | off | Topology-aware 확장: actor에 N/E/S/W 이웃 상류 요약(+8dim) + (`--ctde` 동반 시) 이웃 한정 critic. obs 차원 변경(25→33) → 기존 체크포인트와 비호환, resume 시 값 일치 강제 |
 | `--traffic` | `default` | `high` = 정체 (세종 실측 / dense routes) |
 | `--reward-mode` | `diff-waiting-time` | 보상 함수. `pressure` = max-pressure (하류 포화 억제). pressure 시 `--switch-penalty 0.1` 권장 |
 | `--num-iters` | 200 | 학습 반복 횟수 (1 iter = 8,000 steps) |
