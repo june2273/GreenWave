@@ -66,9 +66,6 @@ class SumoRenderer:
         self.sumo_cfg = Path(sumo_cfg_path).resolve()
         self._net = None
         self._load_net()
-        # lane → SUMO movement(Th/Lt/Rt/Tn) 매핑 (connection dir 속성 기반)
-        # _build_phase_directions() 내에서 채워짐 — phase 구조 분석과 1회 처리
-        self._lane_to_movement: Dict[Tuple[str, str], str] = {}
         # (tls_id, phase_idx) → {"dirs": set, "movement": str} 사전 구축
         # movement: "Th"(직진) / "Lt"(좌회전) / "Rt"(우회전) / "Tn"(U-turn)
         #          / "Mix"(한 phase에 여러 movement 혼재) / "Yel"(yellow phase)
@@ -155,7 +152,6 @@ class SumoRenderer:
           4. phase state 의 'G'/'g' 위치를 lane → 방향 + movement 로 환산
           5. phase 별 dominant movement 결정 (단일이면 그것, 혼합이면 "Mix")
 
-        부산물로 self._lane_to_movement 캐시도 채움 (큐 라벨 분리 시 사용).
         실패 시 빈 dict 반환 → render() 가 legacy fallback 동작.
         """
         if self._net is None:
@@ -218,9 +214,6 @@ class SumoRenderer:
                 )
                 movement = _DIR_TO_MOVEMENT.get(sumo_dir, "?")
                 lane_info.append((direction, movement))
-                # 부산물: lane → movement 캐시 (큐 라벨 분리에 사용)
-                if lane_id:
-                    self._lane_to_movement[(lane_id, tls_id)] = movement
 
             phase_dict: Dict[int, Dict] = {}
             for phase_idx, state in enumerate(phase_states):
@@ -283,10 +276,6 @@ class SumoRenderer:
         if key not in self._lane_dir_cache:
             self._lane_dir_cache[key] = self._lane_to_direction(lane_id, tls_id)
         return self._lane_dir_cache[key]
-
-    def _cached_lane_movement(self, lane_id: str, tls_id: str) -> str:
-        """lane → movement (Th/Lt/Rt/Tn/?). _build_phase_directions 부산물 활용."""
-        return self._lane_to_movement.get((lane_id, tls_id), "?")
 
     def _active_dirs_for(self, agent: str, agent_to_tls: Dict[str, str],
                          current_phase: Dict[str, int]) -> set:

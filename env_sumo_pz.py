@@ -88,7 +88,6 @@ class SumoParallelEnv(ParallelEnv):
         reward_mode: str = "diff-waiting-time",
         tls_ids: Optional[List[str]] = None,
         ctde_mode: bool = False,
-        ctde_shared_reward: bool = False,
         neighbor_obs: bool = False,
         upstream_phase: bool = False,
         progression_coeff: float = 0.0,
@@ -122,7 +121,6 @@ class SumoParallelEnv(ParallelEnv):
         self.max_steps = int(max_steps)
         self.reward_mode = reward_mode
         self.ctde_mode = bool(ctde_mode)
-        self.ctde_shared_reward = bool(ctde_shared_reward)
         # Topology-aware 관측/critic 확장 (기본 False = 기존 동작 그대로).
         #   neighbor_obs=True 면:
         #   - (#3) 각 agent actor obs 끝에 N/S 이웃 교차로의 상류 혼잡 요약
@@ -339,10 +337,6 @@ class SumoParallelEnv(ParallelEnv):
         예: env.add_step_hook(lambda s: frames.append(env.render()))
         """
         self._step_hooks.append(fn)
-
-    def clear_step_hooks(self) -> None:
-        """등록된 모든 step hook 제거 (재사용 시 cleanup)."""
-        self._step_hooks.clear()
 
     def live_metrics(self) -> dict:
         """현재 시뮬레이션 시점의 실시간 집계 지표 스냅샷 (영상 오버레이용).
@@ -1273,12 +1267,6 @@ class SumoParallelEnv(ParallelEnv):
             self._episode_corridor_brt_ratio_sum / self._episode_corridor_brt_count
             if self._episode_corridor_brt_count > 0 else 0.0
         )
-
-        # CTDE 공유 보상 — 모든 agent 가 동일한 mean(reward) 받음
-        if self.ctde_mode and self.ctde_shared_reward and rewards:
-            shared = float(np.mean(list(rewards.values())))
-            for a in rewards:
-                rewards[a] = shared
 
         # info dict — 모든 agent 가 동일한 에피소드 지표를 받음 (callback/eval 호환)
         for agent in self.agents:

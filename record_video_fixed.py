@@ -69,12 +69,6 @@ def parse_args():
                    choices=["symmetric", "sejong"],
                    help="symmetric: N-step 균등 사이클 (3-way 비교 영상용). "
                         "sejong: 세종시 실측 per-TLS 비대칭 (3x2-brt 최종 영상용).")
-    p.add_argument("--baseline-phase-steps", type=int, default=3,
-                   help="symmetric 전용: N 스텝마다 phase 순환 "
-                        "(default 3 × delta_time 5 = 15s/phase).")
-    p.add_argument("--sejong-phase-seconds", type=int, nargs=4, default=None,
-                   help="sejong 전용 단일 set 강제: [NS_SR NS_L EW_SR EW_L]. "
-                        "미명시 시 SEJONG_PER_TLS_PHASE_SECONDS (6 TLS 각각 다른 cycle).")
 
     # ── 출력 / 시각화 ───────────────────────────────────────────
     p.add_argument("--output", type=str, default=None,
@@ -126,26 +120,20 @@ def main():
     # ── 정책 함수 정의 ───────────────────────────────────────────
     if args.baseline == "symmetric":
         def policy_fn(step_idx, agents):
-            phase = int((step_idx // args.baseline_phase_steps) % 4)
+            # 균등 N-step 사이클: 3 step × delta_time 5 = 15s/phase
+            phase = int((step_idx // 3) % 4)
             return {agent: phase for agent in agents}
         label = "FixedTime(Symmetric)"
     else:  # sejong
         dt = args.delta_time
 
-        if args.sejong_phase_seconds is not None:
-            # 단일 set 강제 — 모든 agent 동일
-            phase_secs = args.sejong_phase_seconds
-            def policy_fn(step_idx, agents):
-                phase = _phase_from_secs(phase_secs, step_idx, dt)
-                return {agent: phase for agent in agents}
-        else:
-            # per-TLS 실측 — agent 별 다른 cycle
-            def policy_fn(step_idx, agents):
-                result = {}
-                for agent in agents:
-                    secs = SEJONG_PER_TLS_PHASE_SECONDS.get(agent, [33, 20, 33, 20])
-                    result[agent] = _phase_from_secs(secs, step_idx, dt)
-                return result
+        # per-TLS 실측 — agent 별 다른 cycle
+        def policy_fn(step_idx, agents):
+            result = {}
+            for agent in agents:
+                secs = SEJONG_PER_TLS_PHASE_SECONDS.get(agent, [33, 20, 33, 20])
+                result[agent] = _phase_from_secs(secs, step_idx, dt)
+            return result
         label = "FixedTime(Sejong)"
 
     # ── 환경 셋업 ────────────────────────────────────────────────

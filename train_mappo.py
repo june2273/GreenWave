@@ -17,7 +17,6 @@ import numpy as np
 import ray
 import torch
 from torch.utils.tensorboard import SummaryWriter
-from gymnasium import spaces
 from ray.rllib.algorithms.ppo import PPOConfig
 from ray.rllib.env.wrappers.pettingzoo_env import ParallelPettingZooEnv
 from ray.tune.registry import register_env
@@ -332,7 +331,7 @@ def parse_args():
                    help="저장 경로 (미지정 시 models/MAPPO_sumo_N 자동 버전 생성). "
                         "bare name(예: CTDE_sejong_nb)은 자동으로 models/ 아래 저장; "
                         "경로 구분자/절대경로는 그대로 사용.")
-    p.add_argument("--checkpoint-freq", type=int, default=20,
+    p.add_argument("--checkpoint-freq", type=int, default=5,
                    help="중간 체크포인트 저장 주기 (iter 단위)")
     p.add_argument("--max-steps", type=int, default=3600)
     p.add_argument("--delta-time", type=int, default=5)
@@ -383,12 +382,6 @@ def parse_args():
                    help="Centralized critic (CTDE) 모드 활성화. "
                         "Actor 는 local obs, Critic 은 전체 agent obs concat 을 봄. "
                         "Green Wave 형 협조 학습 유도. 체크포인트는 MAPPO_CTDE_sumo_N 에 저장.")
-    p.add_argument("--ctde-reward", type=str, default="local",
-                   choices=["shared", "local"],
-                   help="--ctde 와 함께 사용. 기본 local: per-agent reward 유지 "
-                        "(N=6 에서 credit 희석 없이 학습 성공 — 검증됨). "
-                        "shared: 모든 agent 가 mean(local rewards) 받음 (global coordination, "
-                        "N=6/LOS D+ 에서 credit 희석로 정책 동결 → 비권장, 재현용으로만).")
     p.add_argument("--neighbor-obs", action="store_true",
                    help="Topology-aware 관측/critic 확장 활성화. "
                         "(#3) actor obs 에 N/S 이웃 상류 혼잡 요약(+4dim) 추가 → "
@@ -477,7 +470,6 @@ def main():
         "tls_ids": tls_ids_effective,
         "reward_mode": args.reward_mode,
         "ctde_mode": bool(args.ctde),
-        "ctde_shared_reward": (args.ctde_reward == "shared"),
         "neighbor_obs": bool(args.neighbor_obs),
         "upstream_phase": bool(args.upstream_phase),
         "progression_coeff": args.progression_coeff,
@@ -700,7 +692,6 @@ def main():
         "brt_weight":   args.brt_weight,
         "time_to_teleport": args.time_to_teleport,
         "ctde_mode":    bool(args.ctde),
-        "ctde_reward":  args.ctde_reward if args.ctde else None,
         "neighbor_obs": bool(args.neighbor_obs),
         "upstream_phase":    bool(args.upstream_phase),
         "progression_coeff": args.progression_coeff,
@@ -721,7 +712,7 @@ def main():
         )
 
     ctde_tag = (
-        f"CTDE (reward={args.ctde_reward})" if args.ctde else "MAPPO (decentralized critic)"
+        "CTDE (centralized critic)" if args.ctde else "MAPPO (decentralized critic)"
     )
     mode_tag = (
         f"RESUME from {args.resume_from}" + (" (weights-only)" if weights_only_actual else "")

@@ -36,8 +36,7 @@ export PYTHONPATH="$SUMO_HOME/tools:$PYTHONPATH"
 # ── 개발·실험용 (2x2) ────────────────────────────────────────────────────────
 python train_mappo.py --map 2x2 --num-iters 200 --num-workers 1
 python train_mappo.py --map 2x2-brt --num-iters 200          # BRT corridor on left col
-python train_mappo.py --map 2x2-brt --ctde                   # CTDE-MAPPO (reward=local 기본), saves to MAPPO_CTDE_sumo_N/
-python train_mappo.py --map 2x2-brt --ctde --ctde-reward shared  # (비권장) 옛 global-mean 보상 재현용
+python train_mappo.py --map 2x2-brt --ctde                   # CTDE-MAPPO (per-agent local reward), saves to MAPPO_CTDE_sumo_N/
 python train_mappo.py --map 2x2-brt --ctde --neighbor-obs        # topology-aware: actor 에 N/S 이웃 혼잡 요약(+4dim) + critic 4-slot
 python train_mappo.py --map 3x2-brt --traffic high --ctde --neighbor-obs --upstream-phase \
   --progression-coeff 3 --brt-prog-weight 4                       # RL-native Green Wave: ②상류 위상 관측 + ①BRT 가중 회랑 progression (DESIGN_progression_greenwave.md)
@@ -174,6 +173,21 @@ RLlib PPO (shared policy)  ←({agent: obs/rew})←  SumoParallelEnv  ←──�
   - `3x2_brt_dense.sumocfg`: dense routes 참조용 config.
 - BRT phase 구조: NS 직진 phase에 BRT lane도 같이 green (별도 BRT phase 없음). BRT 차량 가중치 reward는 후속 과제로 분리 (memory/project_brt_priority_reward 참조).
 
+## Green Wave Progression — 보상 리스크 & 평가 지표 위계
+
+`--progression-coeff`/`--brt-prog-weight`(①) + `--upstream-phase`(②) 운용 지침. 두 리스크(과포화가 진행파를 깎음 / E3 BRT 우대가 cross 굶김)는 **같은 축**(회랑 NS green 예산 vs EW)이라 한 메커니즘으로 같이 다룬다.
+
+- **β가 마스터 안전 노브**: BRT는 NS 직진 phase를 일반차와 공유 → progression이 우대하는 건 "NS 회랑 흐름" 전체, trade-off는 NS↔EW green 분배뿐. base 보상(diff-waiting/pressure)이 이미 EW를 지키므로 **줄다리기**. β가 작으면 보상 늘릴 유일한 길이 *타이밍 개선*(=진짜 green wave)이고, 크면 EW 페널티 감수하고 *green 훔치기*가 이득 → **β 캘리브레이션이 옳은 해 vs 잘못된 해를 가른다**. smoke 실측(base per-step≈−3.5) 기준 **β≈0.5부터 시작**, sweep. (r_prog∈[0,brt_prog_weight].)
+- **속도비 자기완화**: gridlock 에선 속도≈0 → r_prog≈0. 막힌 회랑에서 공짜 보상 파밍 불가 (리스크 #1 부분 자기완화). 진행파의 본거지는 비포화 구간.
+- **EW 과포화는 예측이 아니라 게이트로 잡는다**: eval 이 이미 로깅. E2(brt_prog_weight=1) vs E3(3~5) ablation 에서 **`avg_waiting_time`(헤드라인)이 회귀하면 그 config 폐기** → 실험 설계 자체가 안전장치. 별도 reward 페널티는 지금 넣지 말 것(over-engineering); 모니터에서 EW creep 보이면 그때 EW soft penalty 추가.
+- **평가 지표 위계** (BRT 통과량을 단독 X, 항상 "do no harm" 가드와 한 쌍으로):
+  1. **헤드라인(게이트, 불변)**: `avg_waiting_time` 전체 — RL>Fixed 핵심 주장. 회귀 시 실패.
+  2. **밸런스 가드**: `per_direction_wait_ew` (vs `_ns`) — EW 안 굶겼다 증명.
+  3. **진행파 증거**: `corridor_brt_speed_ratio` (+ 후속 회랑 BRT stops/travel, arrivals-on-green).
+  4. **동반이득**: throughput, stops/veh, CO₂.
+  - 내러티브: "BRT 우선 진행파(3)를 학습해 BRT 개선 + 네트워크 헤드라인(1)·교차류(2) 무해." 3을 1·2와 같은 화면에.
+- **과포화 시나리오(3x2-brt high=LOS D)**: green wave 본거지(비포화)가 거의 없음. base=`pressure`(gridlock 담당) + **작은 β** 로 회랑을 throughput 허용 범위에서 다듬기. 정직한 주장 = "BRT 속도비 X%↑, 무회귀". **깨끗한 진행파(time-space 밴드)는 비포화 regime**(3x2-brt default / 저수요 구간)에서 시연. LOS D 에서 진행파 과장 금지.
+
 ## Key Constraints
 
 - Default TLS id is `"C"` (center intersection node). Green/yellow phases are detected dynamically via `_extract_phase_structure()` — do not remove yellow phases from `tls.tll.xml`.
@@ -240,3 +254,21 @@ Python env 호출 후 (`env.reset` + 임의 action 20-step):
 - `yellow_time=3`, `switch_penalty=0.45`, `time_to_teleport=300` (env 기본값, 학습 CLI default 와 일치)
 
 `env_sumo_pz.py` 의 `SumoParallelEnv.__init__` defaults 는 `train_mappo.py` CLI defaults 와 항상 동기화. 직접 객체 생성 시 (`SumoParallelEnv(...)`) 에도 학습 환경과 동일 reward 식 적용됨.
+
+## 미사용/더미 코드 인벤토리 (2026-06-07 스캔, 삭제 X — 참고용)
+
+green-wave 파이프라인(train→eval→record) 기준 AST/grep 스캔 결과. **삭제하지 말 것** — B/C 는 의도된 보존.
+
+**A. 진짜 orphan — 2026-06-07 삭제 완료:**
+- ~~`env_sumo_pz.py` `clear_step_hooks()`~~ 삭제. (`add_step_hook`/`_step_hooks`/`live_metrics` 는 record_video 가 사용 → 유지.)
+- ~~`sumo_renderer.py` `_cached_lane_movement()` + `_lane_to_movement` 캐시 체인(init·population)~~ 삭제 (유일 reader 였음).
+- ~~`train_mappo.py` `from gymnasium import spaces`~~ 삭제 (미사용 import).
+
+**B. 이 파이프라인에선 미실행이나 *의도된 보존* (legacy/조건부):**
+- `observation_space` 의 non-neighbor CTDE `else` 브랜치 (`_obs_dim + _obs_dim×N`, 175) — green-wave 는 항상 `--neighbor-obs` → 미실행. legacy CTDE(neighbor 없이) 체크포인트 호환용. 보존.
+- `record_video_fixed.py`, `build_3way_compare.py` — RL train/eval 파이프라인 밖(발표용 영상 툴링). 기능적으로 사용됨, 더미 아님.
+- `pressure` reward mode (`REWARD_MODES`) — green-wave 의 과포화 base 로 *권장*. 더미 아님.
+
+**C. False positive (orphan 으로 보이나 프레임워크가 호출 — 건드리지 말 것):**
+- `ctde_module.py` 의 `get_inference_action_dist_cls`/`get_exploration_action_dist_cls`/`get_train_action_dist_cls`/`get_initial_state`/`_forward_train`/`compute_values`/`get_non_inference_attributes` — RLlib RLModule 인터페이스 오버라이드. 이름 직접 호출 없지만 프레임워크가 호출.
+- `from __future__ import annotations` (sumo_renderer.py) — future statement.
