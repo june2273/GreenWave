@@ -429,9 +429,17 @@ def parse_args():
                         "미명시 시 metadata 값 (없으면 8000). "
                         "Colab/빠른 실험: 4000 권장 (iter 당 시간 약 2배 단축, gradient 품질 소폭 저하).")
     p.add_argument("--vf-clip-param", type=float, default=None,
-                   help="value function 손실 clip 임계. 미명시 시 metadata 값 (없으면 1000). "
-                        "vf_explained_var 가 낮고 vf_loss_unclipped 가 이 값보다 훨씬 크면 "
-                        "VF 학습신호가 clip 에 소실됨 → 크게 (예 1e5) 올려 진단. MAPPO·CTDE 공유.")
+                   help="value function 손실 clip 임계. 미명시 시 metadata 값 "
+                        "(없으면 value-norm on=10 / off=1000). value-norm on 이면 σ-단위 outlier "
+                        "guard (10=3.16σ); off 이면 real-space clip. MAPPO·CTDE 공유.")
+    p.add_argument("--value-norm", action=argparse.BooleanOptionalAction, default=None,
+                   help="value-target normalization (MAPPO ValueNorm). 크리틱이 정규화 공간 출력→"
+                        "denorm, 손실은 σ-단위 → vf_clip 이 스케일 독립이 되어 value 학습 붕괴 해소. "
+                        "미명시 시 metadata 값(없으면 on). 끄려면 --no-value-norm (legacy 거동). "
+                        "MAPPO·CTDE 공통. CLAUDE.md 'Value-function 학습 붕괴' 참조.")
+    p.add_argument("--vn-beta", type=float, default=None,
+                   help="ValueNorm running-stat EMA decay (보조 노브; σ 추종 속도). "
+                        "미명시 시 metadata 값 (없으면 0.999). 0.99~0.9995 robust.")
     return p.parse_args()
 
 
@@ -517,6 +525,12 @@ def main():
             return cli_val
         return resume_meta.get(meta_key, default)
 
+    # value-target normalization (MAPPO ValueNorm). 미명시 시 metadata 값(없으면 on).
+    # on 이면 vf_clip 은 σ-단위(default 10), off 면 real-space(default 1000).
+    value_norm = bool(_pick(args.value_norm, "value_norm", True))
+    vn_beta = float(_pick(args.vn_beta, "vn_beta", 0.999))
+    _vf_clip_default = 10.0 if value_norm else 1000.0
+
     hparams = dict(
         lr=_pick(args.lr, "lr", 1e-4),
         gamma=0.99,
@@ -527,7 +541,7 @@ def main():
         clip_param=0.2,
         vf_loss_coeff=0.5,
         entropy_coeff=_pick(args.entropy_coeff, "entropy_coeff", 0.03),
-        vf_clip_param=_pick(args.vf_clip_param, "vf_clip_param", 1000.0),  # diff-waiting reward 스케일(~수천)에 맞춤
+        vf_clip_param=_pick(args.vf_clip_param, "vf_clip_param", _vf_clip_default),
     )
     # entropy 스케줄(선택): 고정 entropy_coeff 를 [[step,val],...] 선형 스케줄로 대체해
     # 초반 탐색→후반 sharpening 을 유도. 새 API 스택은 entropy_coeff 에 직접 schedule 을
@@ -567,6 +581,13 @@ def main():
         .training(**hparams)
     )
 
+    # ── value-target normalization: custom Learner 주입 (MAPPO·CTDE 공통) ──
+    # ValueNormPPOTorchLearner 가 손실을 σ-단위로 정규화 → vf_clip 스케일 독립.
+    # 모듈(아래)이 value_normalizer 를 보유해야 동작. off 면 기본 PPOTorchLearner.
+    if value_norm:
+        from value_norm_learner import ValueNormPPOTorchLearner
+        config = config.learners(learner_class=ValueNormPPOTorchLearner)
+
     # ── CTDE: centralized critic 모듈 주입 ───────────────────────────────
     # obs 는 flat Box [local(D) | global(D*N)]. module 이 forward 시 slice.
     # Dict obs 는 RLlib worker process 의 connector pipeline 에서 silent fail
@@ -590,6 +611,31 @@ def main():
                             "vf_hidden_dim": 256,
                             # module 이 flat Box 에서 local 부분 slice 할 때 사용
                             "local_dim": local_dim_for_module,
+                            # value-target normalization (on 이면 크리틱 정규화 출력).
+                            "value_norm": value_norm,
+                            "vn_beta": vn_beta,
+                        },
+                    )
+                }
+            )
+        )
+    elif value_norm:
+        # ── plain MAPPO + value_norm: 정규화 출력 default 모듈 주입 ────────────
+        # CTDE 아닌 경로는 평소 RLlib 기본 모듈을 쓰지만, value_norm on 이면 크리틱이
+        # 정규화 값을 출력하도록 DefaultPPO 를 얇게 확장한 모듈로 교체.
+        from ray.rllib.core.rl_module.multi_rl_module import MultiRLModuleSpec
+        from ray.rllib.core.rl_module.rl_module import RLModuleSpec
+        from value_norm_module import NormalizedDefaultPPOTorchRLModule
+        config = config.rl_module(
+            rl_module_spec=MultiRLModuleSpec(
+                rl_module_specs={
+                    "shared_policy": RLModuleSpec(
+                        module_class=NormalizedDefaultPPOTorchRLModule,
+                        observation_space=obs_space,
+                        action_space=act_space,
+                        model_config={
+                            "value_norm": value_norm,
+                            "vn_beta": vn_beta,
                         },
                     )
                 }
@@ -621,7 +667,10 @@ def main():
         )
         hparam_overridden = any(v is not None for v in (
             args.lr, args.entropy_coeff, args.entropy_schedule, args.train_batch_size))
-        force_weights_only = env_changed or hparam_overridden
+        # value_norm 변경은 모듈 구조(정규화 버퍼·MAPPO 모듈 클래스)를 바꿈 → from_checkpoint
+        # 가 옛 모듈을 복원해 무시함. legacy(키 없음)=False 취급. 변경 시 weights-only 강제.
+        value_norm_changed = bool(resume_meta.get("value_norm", False)) != value_norm
+        force_weights_only = env_changed or hparam_overridden or value_norm_changed
         if force_weights_only and not args.resume_weights_only:
             reasons = []
             if env_changed:
@@ -631,6 +680,10 @@ def main():
                     f"{args.map}/{args.traffic})")
             if hparam_overridden:
                 reasons.append("하이퍼파라미터 CLI override")
+            if value_norm_changed:
+                reasons.append(
+                    f"value_norm 변경({resume_meta.get('value_norm', False)} → {value_norm}; "
+                    f"모듈 구조 변경)")
             print("[resume][WARN] " + " + ".join(reasons) + " 감지.")
             print("[resume][WARN] from_checkpoint 는 체크포인트의 저장된 config 를 복원해 "
                   "이 변경을 무시합니다 → weights-only 로 자동 전환 "
@@ -700,6 +753,8 @@ def main():
         "upstream_phase":    bool(args.upstream_phase),
         "progression_coeff": args.progression_coeff,
         "brt_prog_weight":   args.brt_prog_weight,
+        "value_norm":        value_norm,
+        "vn_beta":           vn_beta,
         # resume 출처 추적
         "resume_from":         args.resume_from,
         "resume_weights_only": bool(weights_only_actual) if args.resume_from else False,
@@ -717,7 +772,7 @@ def main():
 
     ctde_tag = (
         "CTDE (centralized critic)" if args.ctde else "MAPPO (decentralized critic)"
-    )
+    ) + (f" + ValueNorm(β={vn_beta}, vf_clip={hparams['vf_clip_param']})" if value_norm else "")
     mode_tag = (
         f"RESUME from {args.resume_from}" + (" (weights-only)" if weights_only_actual else "")
         if args.resume_from else "FRESH"

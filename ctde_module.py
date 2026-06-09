@@ -37,6 +37,8 @@ from ray.rllib.utils.annotations import override
 from ray.rllib.utils.framework import try_import_torch
 from ray.rllib.utils.typing import TensorType
 
+from value_norm import ValueNorm, _VN_BETA
+
 torch, nn = try_import_torch()
 
 
@@ -83,8 +85,18 @@ class CentralizedCriticPPOModule(DefaultPPOTorchRLModule):
         self.pi = nn.Linear(h, n_actions)
         self.vf = nn.Linear(h_vf, 1)
         # Value head 작은 init → 초기 value 폭주 억제, VF 빠른 수렴 (orthogonal, MAPPO).
+        # value_norm 시 이 init 은 진짜 이득: z≈0 출력 → denorm≈μ → cold-start 오차 N(0,1).
         nn.init.orthogonal_(self.vf.weight, gain=0.01)
         nn.init.zeros_(self.vf.bias)
+
+        # value-target normalization (MAPPO ValueNorm). on 일 때만 크리틱이 정규화 공간 z 를
+        # 출력하고 compute_values 가 denorm(z)=σz+μ 반환 → value 학습 붕괴(vf_clip saga) 해소.
+        # off 면 normalizer 미생성 + raw vf 출력 (legacy 거동, 표준 PPOTorchLearner 와 호환).
+        self._value_norm = bool(self.model_config.get("value_norm", False))
+        if self._value_norm:
+            self.value_normalizer = ValueNorm(
+                beta=float(self.model_config.get("vn_beta", _VN_BETA))
+            )
 
         self.action_dist_cls = TorchCategorical
 
@@ -129,11 +141,20 @@ class CentralizedCriticPPOModule(DefaultPPOTorchRLModule):
         # Critic uses the FULL obs (own local D | global D*N). 앞 D 차원이 agent
         # 식별자 역할 → per-agent value 학습 가능 (agent-aware centralized critic).
         full_obs = batch[Columns.OBS]
-        return self.vf(self.vf_encoder(full_obs)).squeeze(-1)
+        raw = self.vf(self.vf_encoder(full_obs)).squeeze(-1)
+        # value_norm on: 크리틱은 정규화 공간 z 출력 → GAE/inference 용 real-space 로 denorm.
+        # 손실(ValueNormPPOTorchLearner)은 normalize 후 비교하므로 μ 는 차분에서 상쇄됨.
+        if self._value_norm:
+            return self.value_normalizer.denormalize(raw)
+        return raw
 
     @override(InferenceOnlyAPI)
     def get_non_inference_attributes(self) -> List[str]:
         # Strip critic-side parameters on inference-only EnvRunner workers.
         # Do NOT call super() — the default implementation references
-        # `encoder.critic_encoder`, which we do not have.
-        return ["vf", "vf_encoder"]
+        # `encoder.critic_encoder`, which we do not have. value_normalizer 도
+        # critic 전용(actor 추론 불요)이라 함께 strip.
+        attrs = ["vf", "vf_encoder"]
+        if self._value_norm:
+            attrs.append("value_normalizer")
+        return attrs

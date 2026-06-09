@@ -220,7 +220,7 @@ obs 레이아웃: base `[phase_onehot4, min_green1, density10, queue10]=25` + �
 - **RLlib checkpoint loading**: checkpoints are directories. Do NOT use `PPO.from_checkpoint()` — it tries to spin up SUMO workers and fails with `IndexError`. Use `RLModule.from_checkpoint()` pointing to the sub-path `models/MAPPO_sumo_N/learner_group/learner/rl_module/shared_policy/`. See `_load_rl_module()` in `evaluate_mappo.py` and `record_video_mappo.py`.
 - `models/`, `results/`, `videos/` are gitignored. Curated reference artifacts go in `samples/` (see `samples/README.md`).
 - `entropy_coeff=0.03` (current) — raised from 0.005 to prevent left-turn phase mode collapse in dense traffic scenarios.
-- `vf_clip_param=1000.0` (current) — matches diff-waiting-time reward scale (~thousands); too small causes VF loss signal loss.
+- `vf_clip_param=10.0` (value_norm on, current default) — value-target 정규화 후 σ-단위 outlier guard. value_norm off 시 `1000.0` (real-space, legacy). 자세히는 "Value-function 학습 붕괴" 섹션.
 - `switch_penalty=0.45` (current) — reward 페널티 per phase switch. `yellow_time=3s × 1대/s 손실 ≈ 0.45`. yellow_seconds → throughput 0 으로 인한 oscillation 학습 차단. 0 으로 끄려면 `--switch-penalty 0`. yellow_time=2s 기준 이전 체크포인트 재사용 시 `--switch-penalty 0.3` 명시.
 - `yellow_time=3` (current) — XML TLS 정의(`duration="3"`) 및 세종시 실제 신호(3초)와 일치. Python 환경이 직접 `_simulate_seconds(yellow_time)` 호출 (XML duration은 무시됨).
 - `time_to_teleport=300` (current default) — 차량이 정체에 이 시간 이상 갇히면 SUMO가 정체 너머로 순간이동시켜 grid lock 을 자가 회복 (deadlock 안전밸브). 과거 하드코딩 `-1`(비활성)은 과포화(LOS D+) 시 영구 grid lock → diff-waiting-time 의 행동 의존 신호 소멸 → 학습 불가의 직접 원인이었음. 이제 `env_sumo_pz.py` 의 SUMO 시작 명령은 `self.time_to_teleport` 사용, `--time-to-teleport` CLI 로 override (train/evaluate/record 전부). 너무 짧으면(<120) 정상 대기 차량까지 순간이동 → 지표 과대평가. 평가 시 info `teleported`≈0 확인 = 결과가 텔레포트 인공물이 아님을 검증. 공정 비교 위해 MAPPO·CTDE·Fixed-Time 동일 값(env_kwargs 공유 + evaluate 는 `train_metadata.json` 자동 로드). 옛 거동 재현은 `--time-to-teleport -1`.
@@ -240,14 +240,22 @@ obs 레이아웃: base `[phase_onehot4, min_green1, density10, queue10]=25` + �
 | `clip_param` | `0.2` | PPO clip ε |
 | `vf_loss_coeff` | `0.5` | — |
 | `entropy_coeff` | `0.03` | 좌회전 phase mode collapse 방지 (dense 시나리오 초기 음수 reward → collapse 억제). `--entropy-schedule START END` 로 선형 스케줄(예 `0.03 0.005`, 초반 탐색→후반 sharpening, 75% 지점에서 END 도달) 가능 — 새 API 스택은 `entropy_coeff=[[step,val],...]` 형식. `hparams` 공유라 MAPPO·CTDE 동일 적용 |
-| `vf_clip_param` | `1000.0` | **잠정값 — 정답 아님.** diff-waiting return scale(~수천) 대비 여전히 under-set (실측 explained_var 0.08). `--vf-clip-param` override(미명시 시 metadata 값), `hparams` 공유라 MAPPO·CTDE 동일. **만지기 전 아래 "Value-function 학습 붕괴" 섹션 필독 — 이미 5번 추측으로 오감.** |
+| `vf_clip_param` | `10.0` (value_norm on) / `1000.0` (off) | **value_norm on(기본): σ-단위 outlier guard** (10=3.16σ, 스케일 독립). off: real-space legacy. `--vf-clip-param` override(미명시 시 metadata→default). `hparams` 공유라 MAPPO·CTDE 동일. **튜닝 전 아래 "Value-function 학습 붕괴" 섹션 필독.** |
+| `value_norm` | `True` | value-target normalization(MAPPO ValueNorm). 크리틱 정규화 출력→denorm, σ-단위 손실 → value 학습 붕괴 해소. `--no-value-norm` 으로 off. MAPPO·CTDE 공통 |
+| `vn_beta` | `0.999` | ValueNorm running-stat EMA decay (보조 노브; σ 추종 속도). `--vn-beta` override. Adam 흡수로 영향 간접·소 (활성 노브는 vf_clip) |
 | `yellow_time` | `3` | XML TLS 정의 및 세종시 실제 신호(3초)와 일치. 이전 값 2초로 학습된 모델은 `--yellow-time 2` 명시 |
 | `switch_penalty` | `0.45` | yellow 3초 × 1대/초 손실. yellow_time=2 기준 이전 모델 재사용 시 0.3 명시 |
 | `time_to_teleport` | `300` | SUMO 텔레포트 임계(초). deadlock 안전밸브. `-1`=비활성(과포화 시 영구 grid lock → 학습 불가). `--time-to-teleport` CLI. evaluate 는 metadata 자동 로드 |
 
-## Value-function 학습 붕괴 — vf_clip 추측 금지, 정규화로 해결 (필독)
+## Value-function 학습 붕괴 — value-target 정규화로 **해결됨** (필독)
 
-> 이 절은 후속 작업자(사람/봇)가 **같은 실수를 6번째 반복하지 않도록** 못박는다. 한 줄 요약: **`vf_clip_param` 을 손으로 또 튜닝하지 말 것. 해법은 value-target 정규화다.**
+> 이 절은 후속 작업자(사람/봇)가 **같은 실수를 반복하지 않도록** 못박는다. 한 줄 요약: **`vf_clip_param` 을 손으로 튜닝하지 말 것. value-target 정규화(`--value-norm`, 기본 on)가 적용돼 saga 는 끝났다.**
+
+> **✅ 해결 완료 (구현됨, 기본 on)** — MAPPO ValueNorm 적용. 크리틱이 **정규화 공간** value 를 출력하고 `compute_values` 가 `σ·z+μ` 로 denormalize, 손실은 σ-단위로 계산(`value_norm.py`/`value_norm_learner.py`/`value_norm_module.py`). 효과: ① `vf_clip_param` 이 **σ-단위(스케일 독립) outlier guard** 로 바뀜(default 10 = 3.16σ; return 스케일에 손으로 맞출 값 아님 → saga 종결), ② 크리틱 출력 +μ offset 으로 **cold-start freeze 방지**(unit test: loss-only 면 첫 배치 99.9% freeze, 정규화-출력은 0.15%). `--no-value-norm` 으로 legacy 거동. **MAPPO·CTDE 공통**. 아래 saga 기록은 *왜* 정규화가 정답인지의 근거로 보존.
+>
+> **만지기 전 주의 2가지**: (1) **활성 노브는 β 가 아니라 `vf_clip_param`(σ-단위)** — Adam 이 손실의 1/σ² gradient 스케일을 흡수하므로(상쇄) "작은 grad=안정" 논리는 거짓이고, 진짜 안정자는 σ-단위 clip 의 일관된 outlier freeze. 튜닝하려면 vf_clip ∈ {5,10,20} sweep. (2) **value clip 과 normalization 을 섞지 말 것**(Zheng 2023)의 의미 = *스케일 맞춤용* clip 금지. 현재 vf_clip 은 σ-단위 outlier 가드라 무해.
+
+> 📜 **이하 §증상~§금지 = 구현 전 saga 기록 (보존; 현재형 서술·"1000" 언급은 당시 시점).** 지금 최신 상태는 위 "✅ 해결 완료" — vf_clip default 는 10(σ-단위), value_norm 기본 on.
 
 **증상**: `value/explained_var` 가 **0.04~0.08** (3x2-brt high 실측: MAPPO 0.044 / CTDE 0.076). 크리틱이 return 분산의 4~8%만 설명 = 사실상 "평균만 찍음" → PPO advantage 가 노이즈 → 정책이 노이즈로 학습. MAPPO·CTDE 공통(hparams 공유).
 
@@ -255,12 +263,11 @@ obs 레이아웃: base `[phase_onehot4, min_green1, density10, queue10]=25` + �
 
 **금지 — clip 을 또 추측으로 만지지 말 것.** 이 값은 explained_var 검증 없이 5번 추측으로 오갔다: 기본 10(→`value=10 고정 버그`, 769652b) → 100 → 500(0937409) → **10 으로 재하향(95e8b50, reward `/100→/10` 동시변경하며 "스케일 맞춤"이라 오판)** → 학습붕괴 → 1000 복원(cdb6518: clip 10 에서 `vf_loss_unclipped=175189` vs `vf_loss=9.89` 로 신호 소실). **10→100→500→10→1000, 전부 미검증 추측이고 1000 도 정답 아님.** clip 을 더 키우면(예 1e5) explained_var 는 오르지만 raw value loss(O(1e5))로 gradient 불안정 위험 → 진단용일 뿐.
 
-**올바른 처방 (MARL 문헌 합의)**:
-1. **진단**: `value/explained_var`(이미 TB 로깅됨) 확인. `--vf-clip-param 1e5` 로 짧게 probe → 반응 측정 (1-iter 만에 0.076→0.179 확인됨 = clip 이 throttle 범인 입증).
-2. **해결 = value-target normalization (PopArt 류)**: 크리틱이 *정규화된* return 에 회귀하고 GAE 때 denormalize. MAPPO 논문이 큰 return 스케일에서 "critical, never hurts" 로 보고. RLlib 새 API 내장 없음 → 직접 구현(running mean/std + 출력보존 트릭). **reward 재스케일로 대체하지 말 것** — reward 를 나누면 entropy_coeff·switch_penalty(절대스케일) 균형까지 깨져 재튜닝 필요. 정규화는 *타깃만* 건드려 그 부작용이 없다.
-3. **value clip 과 normalization 을 섞지 말 것** (Zheng 2023). 정규화를 넣으면 `vf_clip_param` 튜닝 자체가 무의미해진다 — 그게 이 saga 를 끝내는 길.
+**진단 근거 (구현 전 probe, 보존)**: `value/explained_var`(TB 로깅) 확인. `--vf-clip-param 1e5` 30-iter probe → 0.076→last5 0.61(8배) 상승 = clip 이 throttle 범인 입증. 단 value loss O(1e4)로 spiky·iter217 에 0.018 붕괴 = "clip 키우기는 throttle 풀지만 불안정 산다" → **clip 튜닝이 아니라 정규화가 정답**임을 데이터로 확인.
 
-**왜 중요**: 두 정책 모두 노이즈 advantage 로도 Fixed 를 압도(−25% wait, +56% throughput) → 거대한 미실현 여지. 망가진 와중에도 CTDE(0.076)>MAPPO(0.044) 1.7배 → value 학습을 고치면 CTDE 구조적 우위가 드러나 "결정적 CTDE>MAPPO" 기회. progression(β) 튜닝·regime 이동보다 **이 value 수정이 최우선**.
+**적용된 해결 = value-target normalization (MAPPO ValueNorm)**: 크리틱이 *정규화된* return 에 회귀, GAE/inference 때 denormalize (`compute_values`→`σz+μ`). RLlib 새 API 내장 없어 직접 구현 (`value_norm.py` 정규화기 + `value_norm_learner.py` σ-단위 손실 + `value_norm_module.py` MAPPO 모듈 + CTDE 는 `ctde_module.py` 자체 보유). **reward 재스케일로 대체 금지** — reward 를 나누면 entropy_coeff·switch_penalty(절대스케일) 균형까지 깨져 재튜닝 필요. 정규화는 *타깃만* 건드려 부작용 없음. ⚠️ `value_norm_learner.py` 는 ray 2.55.1 `PPOTorchLearner.compute_loss_for_module` 복제(vf 블록만 교체) — RLlib 업글 시 parent diff 확인.
+
+**왜 중요**: 두 정책 모두 (망가진) 노이즈 advantage 로도 Fixed 를 압도(−25% wait, +56% throughput) → 거대한 미실현 여지. 망가진 와중에도 CTDE(0.076)>MAPPO(0.044) 1.7배 → value 학습을 고치면 CTDE 구조적 우위가 드러나 "결정적 CTDE>MAPPO" 기회. 다음 단계: value_norm on 으로 **clean β=0 재학습**(progression 끄고) → CTDE>MAPPO 재측정.
 
 **문헌**: MAPPO [arXiv:2103.01955](https://arxiv.org/abs/2103.01955) (Appendix value-norm ablation) · PopArt [arXiv:1602.07714](https://arxiv.org/pdf/1602.07714) · Secrets of RLHF Part I [arXiv:2307.04964](https://arxiv.org/pdf/2307.04964) · Return-based Scaling [arXiv:2105.05347](https://arxiv.org/pdf/2105.05347).
 
@@ -269,8 +276,8 @@ obs 레이아웃: base `[phase_onehot4, min_green1, density10, queue10]=25` + �
 | 증상 | 원인 | 대응 |
 |------|------|------|
 | action 한쪽 0% / 99% | mode collapse (초기 negative reward) | `entropy_coeff` ↑ (현재 0.03), traffic 다양화 |
-| `loss/value` 수렴 안 함 | `vf_clip_param` 너무 작음 (신호 clip 소실) | `vf_clip_param` ↑ (현재 1000) |
-| `value/explained_var` < 0.7 | 크리틱 undertrained (평균만 맞춤) | `--vf-clip-param` ↑ 로 clip 소실 확인, centralized critic(`--ctde`) ROI 높음 |
+| `loss/value` 수렴 안 함 | value_norm off + `vf_clip_param` 너무 작음 (신호 clip 소실) | `--value-norm`(기본 on) 확인; off 면 `vf_clip_param` ↑ |
+| `value/explained_var` < 0.7 | 크리틱 undertrained / value_norm off | `--value-norm` on 확인 ("Value-function 학습 붕괴" 섹션). value_norm 에선 vf_clip ∈{5,10,20} sweep, centralized critic(`--ctde`) ROI 높음 |
 | `phase_switches` > 1200 (4 agent 기준) | 과도 switching | `--switch-penalty` ↑, `--min-green` ↑ |
 | `policy/yellow_ratio` > 0.15 | phase oscillation (매 step switching) | `--switch-penalty` ↑, `entropy_coeff` ↓ |
 | `teleported` ≫ 0 | grid lock (정체 한계 초과, 안전밸브 빈발) | `--traffic` 낮추기, network 수정. 소수(≈0)는 정상 deadlock 회복 |
