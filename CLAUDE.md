@@ -39,7 +39,7 @@ python train_mappo.py --map 2x2-brt --num-iters 200          # BRT corridor on l
 python train_mappo.py --map 2x2-brt --ctde                   # CTDE-MAPPO (per-agent local reward), saves to MAPPO_CTDE_sumo_N/
 python train_mappo.py --map 2x2-brt --ctde --neighbor-obs        # topology-aware: actor 에 N/S 이웃 혼잡 요약(+4dim) + critic 4-slot
 python train_mappo.py --map 3x2-brt --traffic high --ctde --neighbor-obs --upstream-phase \
-  --progression-coeff 3 --brt-prog-weight 4                       # RL-native Green Wave: ②상류 위상 관측 + ①BRT 가중 회랑 progression (DESIGN_progression_greenwave.md)
+  --progression-coeff 3 --brt-prog-weight 4                       # RL-native Green Wave: ②상류 위상 관측 + ①BRT 가중 회랑 progression (설계: "Green Wave Progression" 섹션)
 
 # ── 세종시 현실 시뮬레이션 최종 버전 (3x2-brt) ────────────────────────────────
 python train_mappo.py --map 3x2-brt --traffic high --num-iters 300 --num-workers 1
@@ -137,7 +137,7 @@ RLlib PPO (shared policy)  ←({agent: obs/rew})←  SumoParallelEnv  ←──�
 **Action / Observation / Reward (per agent):**
 - Actions: `Discrete(num_green)` — green phase 수는 네트워크에서 자동 감지 (모든 시나리오 4). yellow phase는 정책이 직접 선택 불가, green 전환 시 자동 삽입. **의미 매핑**: `single` 은 4 방향 round-robin (한 번에 한 방향 직진+좌회전), `2x2`/`3x2` 표준은 ring & barrier 비대칭 (action 0/2 = NS/EW 양방향 직진+우회전 33s, action 1/3 = NS/EW 양방향 좌회전 protected 6s). NS 와 EW 절대 동시 green 안 됨.
 - Observation: `[phase_one_hot(num_green), min_green_flag(1), density_per_lane(L), queue_per_lane(L)]` shape = `num_green + 1 + 2*L`. **`L=max(per-agent lanes)`**; 작은 agent의 obs는 density/queue 부분을 0 패딩 (BRT 시나리오의 mixed-lane topology 지원). 시나리오별 `obs_dim`: single=13, 2x2/3x2=21, 2x2-brt/3x2-brt=25.
-- **RL-native Green Wave 확장 (default off, 설계: `DESIGN_progression_greenwave.md`)** — 회랑(BRT corridor, N/S축)에서 무정차 진행파를 *학습*으로 유도하는 3 플래그:
+- **RL-native Green Wave 확장 (default off, 설계: "Green Wave Progression" 섹션)** — 회랑(BRT corridor, N/S축)에서 무정차 진행파를 *학습*으로 유도하는 3 플래그:
   - `--neighbor-obs` (#3): 각 agent actor obs 끝에 **N/S 이웃**의 상류 혼잡 요약 `[mean_density, mean_queue]×2 = +4 dim`. (#1) `--ctde` 동반 시 critic 입력 = `[own | agent_id one-hot(N) | N/E/S/W 이웃 obs]` — **actor-lean(N/S)/critic-rich(4방향)**. 인접·방향은 `_derive_neighbor_dirs`(net 연결성+상대좌표)로 자동 도출.
   - `--upstream-phase` (②, `--neighbor-obs` 필요): N/S 이웃의 위상 시계 `[phase_one_hot(num_green), elapsed_norm] × 2 = +10 dim` 추가 → 상류 platoon 도착 타이밍 관측, green wave 오프셋 학습.
   - `--progression-coeff β`, `--brt-prog-weight` (①, reward): corridor agent(=BRT 전용차로 보유, `getAllowed` 자동식별)의 ns-through lane **가중 평균 속도비**를 β배 가산 → 무정차 통과 보상. `brt_prog_weight>1`=BRT 우선(TSP). β는 reward_mode 의존(diff-waiting 1~5 / pressure 5~20, smoke 실측).
@@ -187,6 +187,29 @@ RLlib PPO (shared policy)  ←({agent: obs/rew})←  SumoParallelEnv  ←──�
   4. **동반이득**: throughput, stops/veh, CO₂.
   - 내러티브: "BRT 우선 진행파(3)를 학습해 BRT 개선 + 네트워크 헤드라인(1)·교차류(2) 무해." 3을 1·2와 같은 화면에.
 - **과포화 시나리오(3x2-brt high=LOS D)**: green wave 본거지(비포화)가 거의 없음. base=`pressure`(gridlock 담당) + **작은 β** 로 회랑을 throughput 허용 범위에서 다듬기. 정직한 주장 = "BRT 속도비 X%↑, 무회귀". **깨끗한 진행파(time-space 밴드)는 비포화 regime**(3x2-brt default / 저수요 구간)에서 시연. LOS D 에서 진행파 과장 금지.
+
+### 설계 요약 (차원 / ablation)
+
+목표: MAPPO/CTDE 가 한누리대로 BRT 회랑(좌열 tl_0→tl_2→tl_4)에서 무정차 진행파를 *학습*으로 만든다. 두 레버는 한 몸 — **②(`--upstream-phase`)가 상류 신호 타이밍을 관측, ①(`--progression-coeff`)이 무정차 통과를 보상**. ②없이 ①만 주면 platoon 도착 타이밍을 몰라 학습난 → 구현·실험 순서 ②→①. 회랑 자동식별 = BRT 전용차로(`getAllowed` 에 bus 포함·passenger 제외), 하드코딩 0. **actor lean(N/S만)/critic rich(N/E/S/W 4-slot)**.
+
+obs 레이아웃: base `[phase_onehot4, min_green1, density10, queue10]=25` + 방향블록 `[mean_density, mean_queue (+ upstream 면 phase_onehot4, elapsed_norm1)]` × {N,S}. `elapsed_norm=min(1, _elapsed_phase_time/60)` (`_PHASE_TIME_NORM=60`) → 전부 [0,1]. r_prog = corridor ns-through lane 의 차량 가중평균 속도비 ∈ [0,1] (버스는 `brt_prog_weight` 가중; **docstring 의 상한 brt_prog_weight 는 과표기, 실제 정규화 평균이라 [0,1]**).
+
+| 구성 | actor obs (_obs_dim) | CTDE critic |
+|---|---|---|
+| base (플래그 없음) | 25 | — |
+| `--neighbor-obs` (N/S 혼잡 +4) | 29 | 29+6+29×4 = 151 |
+| `+--upstream-phase` (N/S 위상+경과 +10) | **39** | 39+6+39×4 = **201** |
+
+**Ablation 매트릭스** — 각 run 은 old CTDE(`eval_sejong_dense_30.csv`) + 동일조건 MAPPO 와 비교. 공정 위해 MAPPO 도 같은 obs 플래그로 재학습, warmup→dense weights-only resume 복제(`--upstream-phase` 는 양 phase 필수):
+
+| run | neighbor | upstream | β | brt_prog_w | obs/critic | 의미 |
+|---|---|---|---|---|---|---|
+| E0 | ✓ | ✗ | 0 | – | 29/151 | N/S 혼잡 인지만 |
+| E1 | ✓ | ✓ | 0 | – | 39/201 | +상류 타이밍 관측 (② 단독; 깨끗한 ablation = phase 하나 차이) |
+| E2 | ✓ | ✓ | β | 1.0 | 39/201 | +회랑 진행파 (BRT 무가중) |
+| E3 | ✓ | ✓ | β | 3~5 | 39/201 | +BRT 우선 진행파 (full TSP) |
+
+진행파 측정: info `corridor_brt_speed_ratio` / `corridor_brt_stops`. 비-BRT 맵: corridor=∅ → progression 전역 no-op. ctde_module 은 차원 자동인식이라 플래그 토글 시 무변경. obs 차원 변경 → 미지정 ckpt 비호환: metadata `neighbor_obs`/`upstream_phase` 추적, resume 불일치 거부, eval/record 모델별 로드(progression 은 reward-only → 추론 무관).
 
 ## Key Constraints
 

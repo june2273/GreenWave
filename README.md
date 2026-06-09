@@ -80,7 +80,7 @@ CTDE Actor:  π_i( a_i | o_i )            ← 자기 obs만 (실행 시 동일)
 
 #### RL-native Green Wave 확장 (선택, 회랑 진행파 학습)
 
-기본 CTDE는 보상에 *진행(progression)* 항이, 관측에 상류 platoon *도착 타이밍*이 없어 진행파가 창발하지 않습니다. 한누리대로 BRT 회랑(좌열, N/S축)에서 **무정차 진행파를 학습으로 유도**하는 3 플래그를 추가합니다 (설계: `DESIGN_progression_greenwave.md`):
+기본 CTDE는 보상에 *진행(progression)* 항이, 관측에 상류 platoon *도착 타이밍*이 없어 진행파가 창발하지 않습니다. 한누리대로 BRT 회랑(좌열, N/S축)에서 **무정차 진행파를 학습으로 유도**하는 3 플래그를 추가합니다 (설계 상세: `CLAUDE.md` 의 "Green Wave Progression" 섹션):
 
 - **`--neighbor-obs` (#1+#3)** — actor obs에 **N/S 이웃**의 상류 혼잡 요약 `[mean_density, mean_queue]×2` 추가(anticipation). `--ctde` 동반 시 critic 입력 = `[own | agent_id one-hot | N/E/S/W 이웃 obs]` → **actor-lean(N/S)/critic-rich(4방향)**.
 - **`--upstream-phase` (②)** — N/S 이웃의 위상 시계 `[phase_one_hot, 경과시간]×2` 추가 → 상류 신호 타이밍을 관측해 green wave 오프셋을 학습. (`--neighbor-obs` 필요.)

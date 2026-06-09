@@ -102,9 +102,8 @@ PY
 ## 6. md 문서 반영
 
 변경을 다음 문서에 동기화 (해당하는 곳만):
-- **CLAUDE.md**: Commands 예시, 플래그 설명, "미사용/더미 코드 인벤토리", PPO 표, Key Constraints.
+- **CLAUDE.md**: Commands 예시, 플래그 설명, green-wave 설계(차원/ablation), PPO 표, Key Constraints, "미사용/더미 코드 인벤토리".
 - **README.md**: 사용자용 명령·데이터 출처.
-- **DESIGN_progression_greenwave.md**: green-wave 설계 수치.
 
 원칙: 동작이 안 바뀌면(예: 균등 사이클 15s/phase 유지) 서술 추가 불필요 — stale 참조 제거에 집중.
 최종 sweep: `grep -rn "<지운것들>" --include="*.md" .` 가 clean이어야 종료.
