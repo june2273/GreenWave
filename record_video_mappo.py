@@ -57,7 +57,6 @@ def _build_render_label(model_path: str) -> str:
     "MAPPO · iter 185" / "CTDE · iter 130" 형식.
     metadata 가 없으면 모델 디렉터리명으로 폴백.
     """
-    import json
     meta_path = Path(model_path) / "train_metadata.json"
     if meta_path.exists():
         try:
@@ -169,8 +168,10 @@ def main():
             _m = json.loads(_meta_path.read_text())
             env_kwargs["neighbor_obs"] = bool(_m.get("neighbor_obs", False))
             env_kwargs["upstream_phase"] = bool(_m.get("upstream_phase", False))
-        except Exception:
-            pass
+        except Exception as e:
+            # 조용히 넘기면 obs 차원 불일치(actor mat-mul 에러)로 이어지므로 경고 노출.
+            print(f"[WARN] train_metadata.json 읽기 실패 ({type(e).__name__}: {e}) "
+                  f"→ neighbor_obs/upstream_phase 미적용. obs 차원 불일치 가능.")
     env = SumoParallelEnv(**env_kwargs)
 
     # 렌더 타이틀 라벨: 체크포인트 train_metadata.json 에서 MAPPO/CTDE + iter 추출
@@ -235,7 +236,6 @@ def main():
           f"~{duration:.1f}s, mode={args.mode})")
 
     if args.dump_metrics and metrics is not None:
-        import json
         mpath = Path(args.dump_metrics)
         mpath.parent.mkdir(parents=True, exist_ok=True)
         with open(mpath, "w") as f:

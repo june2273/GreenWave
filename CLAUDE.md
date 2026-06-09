@@ -145,7 +145,7 @@ RLlib PPO (shared policy)  ←({agent: obs/rew})←  SumoParallelEnv  ←──�
 - Reward: `--reward-mode` 로 2개 모드 (`REWARD_MODES = ["diff-waiting-time", "pressure"]`). **`diff-waiting-time` (기본)** — `(prev − current) / 10`, 자기 진입로 차분 대기시간. **`pressure`** — `Σ#(out_lanes 차량) − Σ#(in_lanes 차량)` (max-pressure/backpressure, Varaiya 2013·PressLight 2019; 하류 포화·스필백 억제). pressure 는 스케일이 작아(±수십 vs diff-waiting ~수천) `switch_penalty=0.45` 가 과해짐 → `--switch-penalty 0.1` 전후 권장, 차량 *수* 기반이라 `brt_weight` 미적용. 두 모드 공통 `switch_penalty=0.45` (phase switching 시 reward -= 0.45, oscillation 억제, yellow_time=3s 기준).
 - `--brt-weight w` (default 1.0, BRT 시나리오 전용): 보상함수에서 BRT(vClass=bus) 대기시간에 부여하는 중요도 계수. `w=1.0` = 일반 차량과 동등 취급 (baseline, lane.getWaitingTime 합과 수학적으로 동일). `w>1` → BRT 대기시간 감소를 더 크게 보상해 정책이 BRT 우선 신호를 학습하도록 유도. 실제 대기시간을 늘리는 게 아닌 보상 신호 비중 조정 (`current_wait = Σ_veh w_veh × accum_wait / 10`). 권장: `2.0~3.0`. info dict 의 `avg_wait_brt/car`, `brt_seen`, `car_seen` 는 w 와 무관하게 항상 기록.
 
-**`train_mappo.py`** — Builds a `PPOConfig` with shared policy across all agents, runs the training loop, writes TensorBoard scalars to `results/tb_mappo/<run_name>/`, and saves RLlib checkpoints (directory format) to `models/MAPPO_sumo_N/`. `--ctde` flag enables centralized critic (CTDE-MAPPO), saving to `models/MAPPO_CTDE_sumo_N/`. A `train_metadata.json` is saved alongside each checkpoint with all hyperparameters and map settings. **MAPPO·CTDE 하이퍼파라미터 동등성**: `--ctde` 는 `.rl_module(...)` 로 RLModule 만 `CentralizedCriticPPOModule` 로 교체할 뿐 `.training(**hparams)`(lr·entropy_coeff·train_batch_size·clip·vf_clip 등)는 두 경로가 동일하게 적용 → 같은 CLI flag(+`--ctde`)로 학습하면 공정 비교 보장 (차이는 centralized critic 뿐).
+**`train_mappo.py`** — Builds a `PPOConfig` with shared policy across all agents, runs the training loop, writes TensorBoard scalars to `results/tb_mappo/<run_name>/`, and saves RLlib checkpoints (directory format) to `models/MAPPO_sumo_N/`. `--ctde` flag enables centralized critic (CTDE-MAPPO), saving to `models/MAPPO_CTDE_sumo_N/`. A `train_metadata.json` is saved alongside each checkpoint with all hyperparameters and map settings. 학습 루프는 `value/explained_var`(크리틱 fit 품질: 1.0=완벽, ~0=평균만, <0=평균보다 나쁨; <0.7 면 크리틱 undertrained → centralized critic 강화 ROI 신호) 스칼라를 TensorBoard 에 기록하고, iter 1 에서 learner 가 노출하는 실제 키 목록을 1회 진단 덤프한다 (RLlib 버전별 키명 차이 대응 — `vf_explained_var`/`vf_explained_variance`/`explained_variance` 순회). **MAPPO·CTDE 하이퍼파라미터 동등성**: `--ctde` 는 `.rl_module(...)` 로 RLModule 만 `CentralizedCriticPPOModule` 로 교체할 뿐 `.training(**hparams)`(lr·entropy_coeff·train_batch_size·clip·vf_clip 등)는 두 경로가 동일하게 적용 → 같은 CLI flag(+`--ctde`)로 학습하면 공정 비교 보장 (차이는 centralized critic 뿐).
 
 **`evaluate_mappo.py`** — 3-way comparison: MAPPO vs CTDE-MAPPO (optional) vs Fixed-time. Results saved to `results/eval_metrics_mappo_N.csv` with metadata prefix columns for model traceability. `--baseline` 선택: `symmetric` (균등 N-step 사이클, 기본) / `sejong` (공공데이터포털·세담터 실측 자료 기반 per-TLS 비대칭 신호 — `SEJONG_PER_TLS_PHASE_SECONDS` dict 의 6 TLS 매핑). **`neighbor_obs` 는 env_kwargs 공유가 아니라 모델별로 개별 로드** (`train_meta`/`train_meta_ctde` 에서 `nb_mappo`/`nb_ctde`): 옛 모델(False)과 topology-aware 재학습 모델(True)이 섞여도 각 정책이 학습 때와 같은 obs 를 보게 함 (SUMO 동역학·routes·reward 동일 → 공정). FixedTime 은 obs 미사용이라 무관. `upstream_phase` 도 동일하게 모델별 로드(`up_mappo`/`up_ctde`); progression(①)은 reward-only 라 추론 미적용. CSV 에 `neighbor_obs`/`upstream_phase`/`progression_coeff`/`brt_prog_weight`(+ `_ctde`) + `corridor_brt_speed_ratio` 컬럼 기록. `record_video_mappo.py` 도 동일하게 모델 metadata 에서 읽어 추론 env 에 전달.
 
@@ -217,10 +217,29 @@ RLlib PPO (shared policy)  ←({agent: obs/rew})←  SumoParallelEnv  ←──�
 | `clip_param` | `0.2` | PPO clip ε |
 | `vf_loss_coeff` | `0.5` | — |
 | `entropy_coeff` | `0.03` | 좌회전 phase mode collapse 방지 (dense 시나리오 초기 음수 reward → collapse 억제). `--entropy-schedule START END` 로 선형 스케줄(예 `0.03 0.005`, 초반 탐색→후반 sharpening, 75% 지점에서 END 도달) 가능 — 새 API 스택은 `entropy_coeff=[[step,val],...]` 형식. `hparams` 공유라 MAPPO·CTDE 동일 적용 |
-| `vf_clip_param` | `1000.0` | diff-waiting-time reward scale(~수천)에 맞춤. 작으면 VF 학습신호 99% clip 소실 |
+| `vf_clip_param` | `1000.0` | **잠정값 — 정답 아님.** diff-waiting return scale(~수천) 대비 여전히 under-set (실측 explained_var 0.08). `--vf-clip-param` override(미명시 시 metadata 값), `hparams` 공유라 MAPPO·CTDE 동일. **만지기 전 아래 "Value-function 학습 붕괴" 섹션 필독 — 이미 5번 추측으로 오감.** |
 | `yellow_time` | `3` | XML TLS 정의 및 세종시 실제 신호(3초)와 일치. 이전 값 2초로 학습된 모델은 `--yellow-time 2` 명시 |
 | `switch_penalty` | `0.45` | yellow 3초 × 1대/초 손실. yellow_time=2 기준 이전 모델 재사용 시 0.3 명시 |
 | `time_to_teleport` | `300` | SUMO 텔레포트 임계(초). deadlock 안전밸브. `-1`=비활성(과포화 시 영구 grid lock → 학습 불가). `--time-to-teleport` CLI. evaluate 는 metadata 자동 로드 |
+
+## Value-function 학습 붕괴 — vf_clip 추측 금지, 정규화로 해결 (필독)
+
+> 이 절은 후속 작업자(사람/봇)가 **같은 실수를 6번째 반복하지 않도록** 못박는다. 한 줄 요약: **`vf_clip_param` 을 손으로 또 튜닝하지 말 것. 해법은 value-target 정규화다.**
+
+**증상**: `value/explained_var` 가 **0.04~0.08** (3x2-brt high 실측: MAPPO 0.044 / CTDE 0.076). 크리틱이 return 분산의 4~8%만 설명 = 사실상 "평균만 찍음" → PPO advantage 가 노이즈 → 정책이 노이즈로 학습. MAPPO·CTDE 공통(hparams 공유).
+
+**근본 원인 (한 줄)**: `vf_clip_param` 은 *per-step reward* 가 아니라 *누적 return(=value 타깃, diff-waiting 은 ~수천)* 스케일에 맞춰야 한다. 작게 두면 value 예측오차가 clip 에 잘려 크리틱이 초기값에 고정됨(과거 "value=10 고정 버그"). 실측: clip 1000 에서 `vf_loss_unclipped≈104,000` vs `vf_loss≈927` (약 100배 갭) → **현재 1000 도 여전히 under-set**.
+
+**금지 — clip 을 또 추측으로 만지지 말 것.** 이 값은 explained_var 검증 없이 5번 추측으로 오갔다: 기본 10(→`value=10 고정 버그`, 769652b) → 100 → 500(0937409) → **10 으로 재하향(95e8b50, reward `/100→/10` 동시변경하며 "스케일 맞춤"이라 오판)** → 학습붕괴 → 1000 복원(cdb6518: clip 10 에서 `vf_loss_unclipped=175189` vs `vf_loss=9.89` 로 신호 소실). **10→100→500→10→1000, 전부 미검증 추측이고 1000 도 정답 아님.** clip 을 더 키우면(예 1e5) explained_var 는 오르지만 raw value loss(O(1e5))로 gradient 불안정 위험 → 진단용일 뿐.
+
+**올바른 처방 (MARL 문헌 합의)**:
+1. **진단**: `value/explained_var`(이미 TB 로깅됨) 확인. `--vf-clip-param 1e5` 로 짧게 probe → 반응 측정 (1-iter 만에 0.076→0.179 확인됨 = clip 이 throttle 범인 입증).
+2. **해결 = value-target normalization (PopArt 류)**: 크리틱이 *정규화된* return 에 회귀하고 GAE 때 denormalize. MAPPO 논문이 큰 return 스케일에서 "critical, never hurts" 로 보고. RLlib 새 API 내장 없음 → 직접 구현(running mean/std + 출력보존 트릭). **reward 재스케일로 대체하지 말 것** — reward 를 나누면 entropy_coeff·switch_penalty(절대스케일) 균형까지 깨져 재튜닝 필요. 정규화는 *타깃만* 건드려 그 부작용이 없다.
+3. **value clip 과 normalization 을 섞지 말 것** (Zheng 2023). 정규화를 넣으면 `vf_clip_param` 튜닝 자체가 무의미해진다 — 그게 이 saga 를 끝내는 길.
+
+**왜 중요**: 두 정책 모두 노이즈 advantage 로도 Fixed 를 압도(−25% wait, +56% throughput) → 거대한 미실현 여지. 망가진 와중에도 CTDE(0.076)>MAPPO(0.044) 1.7배 → value 학습을 고치면 CTDE 구조적 우위가 드러나 "결정적 CTDE>MAPPO" 기회. progression(β) 튜닝·regime 이동보다 **이 value 수정이 최우선**.
+
+**문헌**: MAPPO [arXiv:2103.01955](https://arxiv.org/abs/2103.01955) (Appendix value-norm ablation) · PopArt [arXiv:1602.07714](https://arxiv.org/pdf/1602.07714) · Secrets of RLHF Part I [arXiv:2307.04964](https://arxiv.org/pdf/2307.04964) · Return-based Scaling [arXiv:2105.05347](https://arxiv.org/pdf/2105.05347).
 
 ## Troubleshooting
 
@@ -228,6 +247,7 @@ RLlib PPO (shared policy)  ←({agent: obs/rew})←  SumoParallelEnv  ←──�
 |------|------|------|
 | action 한쪽 0% / 99% | mode collapse (초기 negative reward) | `entropy_coeff` ↑ (현재 0.03), traffic 다양화 |
 | `loss/value` 수렴 안 함 | `vf_clip_param` 너무 작음 (신호 clip 소실) | `vf_clip_param` ↑ (현재 1000) |
+| `value/explained_var` < 0.7 | 크리틱 undertrained (평균만 맞춤) | `--vf-clip-param` ↑ 로 clip 소실 확인, centralized critic(`--ctde`) ROI 높음 |
 | `phase_switches` > 1200 (4 agent 기준) | 과도 switching | `--switch-penalty` ↑, `--min-green` ↑ |
 | `policy/yellow_ratio` > 0.15 | phase oscillation (매 step switching) | `--switch-penalty` ↑, `entropy_coeff` ↓ |
 | `teleported` ≫ 0 | grid lock (정체 한계 초과, 안전밸브 빈발) | `--traffic` 낮추기, network 수정. 소수(≈0)는 정상 deadlock 회복 |

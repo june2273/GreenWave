@@ -428,6 +428,10 @@ def parse_args():
                    help="PPO 배치 크기 (스텝 수). "
                         "미명시 시 metadata 값 (없으면 8000). "
                         "Colab/빠른 실험: 4000 권장 (iter 당 시간 약 2배 단축, gradient 품질 소폭 저하).")
+    p.add_argument("--vf-clip-param", type=float, default=None,
+                   help="value function 손실 clip 임계. 미명시 시 metadata 값 (없으면 1000). "
+                        "vf_explained_var 가 낮고 vf_loss_unclipped 가 이 값보다 훨씬 크면 "
+                        "VF 학습신호가 clip 에 소실됨 → 크게 (예 1e5) 올려 진단. MAPPO·CTDE 공유.")
     return p.parse_args()
 
 
@@ -523,7 +527,7 @@ def main():
         clip_param=0.2,
         vf_loss_coeff=0.5,
         entropy_coeff=_pick(args.entropy_coeff, "entropy_coeff", 0.03),
-        vf_clip_param=1000.0,     # diff-waiting reward 스케일(~수천)에 맞춤
+        vf_clip_param=_pick(args.vf_clip_param, "vf_clip_param", 1000.0),  # diff-waiting reward 스케일(~수천)에 맞춤
     )
     # entropy 스케줄(선택): 고정 entropy_coeff 를 [[step,val],...] 선형 스케줄로 대체해
     # 초반 탐색→후반 sharpening 을 유도. 새 API 스택은 entropy_coeff 에 직접 schedule 을
@@ -766,6 +770,25 @@ def main():
                 val = policy_stats.get(key)
                 if val is not None:
                     tb_writer.add_scalar(tag, val, global_iter)
+
+            # Value function explained variance — 크리틱 fit 품질 진단.
+            #   1.0=완벽, ~0=평균만 맞춤(무용), <0=평균보다 나쁨. <0.7 이면 크리틱
+            #   undertrained → centralized critic 강화 ROI 높음 (DESIGN: critic 강화 경로).
+            #   RLlib 버전별 키명이 달라 후보를 순회.
+            ev_val = None
+            for ev_key in ("vf_explained_var", "vf_explained_variance",
+                           "vf_explained_var_mean", "explained_variance"):
+                if policy_stats.get(ev_key) is not None:
+                    ev_val = policy_stats[ev_key]
+                    break
+            if ev_val is not None:
+                tb_writer.add_scalar("value/explained_var", ev_val, global_iter)
+            if i == 1:
+                # 1-iter 진단용 1회 덤프 — learner 가 노출하는 실제 키 + 핵심값.
+                print(f"[diag] learner keys: {sorted(policy_stats.keys())}")
+                print(f"[diag] vf_explained_var={ev_val}  "
+                      f"vf_loss={policy_stats.get('vf_loss')}  "
+                      f"entropy={policy_stats.get('entropy')}")
 
             # 콜백이 등록한 커스텀 메트릭 (action_dist, phase_switches, teleported, max_queue)
             # new API stack: env_stats 하위에 평탄화되어 들어옴
