@@ -196,12 +196,17 @@ def _row_from_info(algorithm: str, ep: int, seed: int, info: dict) -> dict:
 
 
 def run_episode(env: SumoParallelEnv, action_fn, seed: int) -> dict:
-    """에피소드 1회 실행 후 마지막 info 반환"""
+    """에피소드 1회 실행 후 마지막 info 반환.
+
+    action_fn(obs_dict, step_idx, env) — env 를 넘겨 sim-time 기반 베이스라인
+    (fixed_action_sejong 의 env.sim_step 사용)이 가능하게 한다. RL action_fn 은
+    env.agents 만 사용.
+    """
     obs_dict, _ = env.reset(seed=seed)
     step_idx = 0
     last_infos: dict = {}
     while env.agents:
-        actions = action_fn(obs_dict, step_idx, env.agents)
+        actions = action_fn(obs_dict, step_idx, env)
         obs_dict, _, _, _, last_infos = env.step(actions)
         step_idx += 1
     # 단일·다중 교차로 공통: 첫 번째 에이전트 info 기준 (에피소드 지표는 동일)
@@ -250,31 +255,41 @@ def main():
     if train_meta.get("map") and train_meta["map"] != args.map:
         print(f"[warning] train map='{train_meta['map']}' vs eval map='{args.map}' 불일치")
 
-    # BRT 가중치 결정: CLI 명시값 > train_metadata > default(1.0)
+    # env 설정의 metadata fallback 소스: --model(MAPPO) metadata 우선, 없으면(CTDE 단독
+    # 평가) CTDE metadata. 과거엔 train_meta(MAPPO)만 봐서 --model-ctde 단독 실행 시
+    # pressure 로 학습한 모델도 diff-waiting 환경/CSV 라벨로 평가되는 버그가 있었음.
+    meta_for_env = train_meta if args.model else train_meta_ctde
+    if (train_meta and train_meta_ctde
+            and train_meta.get("reward_mode") != train_meta_ctde.get("reward_mode")):
+        print(f"[warning] MAPPO/CTDE 의 reward_mode 가 다릅니다: "
+              f"{train_meta.get('reward_mode')} vs {train_meta_ctde.get('reward_mode')} "
+              f"— env 는 전자({train_meta.get('reward_mode')}) 기준으로 동작합니다.")
+
+    # BRT 가중치 결정: CLI 명시값 > metadata > default(1.0)
     # 학습 시와 동일한 reward 환경에서 평가하기 위함. 베이스라인 비교 시
     # --brt-weight 1.0 명시 권장.
     if args.brt_weight is not None:
         brt_weight_effective = float(args.brt_weight)
     else:
-        brt_weight_effective = float(train_meta.get("brt_weight", 1.0))
+        brt_weight_effective = float(meta_for_env.get("brt_weight", 1.0))
     print(f"[brt_weight={brt_weight_effective}]")
 
-    # 텔레포트 임계 결정: CLI 명시값 > train_metadata > default(300)
+    # 텔레포트 임계 결정: CLI 명시값 > metadata > default(300)
     # 학습 시와 동일 환경에서 평가해야 하고, 세 베이스라인(MAPPO·CTDE·Fixed-Time)에
     # 동일 값을 적용해야 공정 비교가 됨 (env_kwargs 공유로 자동 보장).
     if args.time_to_teleport is not None:
         ttt_effective = int(args.time_to_teleport)
     else:
-        ttt_effective = int(train_meta.get("time_to_teleport", 300))
+        ttt_effective = int(meta_for_env.get("time_to_teleport", 300))
     print(f"[time_to_teleport={ttt_effective}]")
 
-    # 보상 모드 결정: CLI 명시값 > train_metadata > default(diff-waiting-time).
+    # 보상 모드 결정: CLI 명시값 > metadata > default(diff-waiting-time).
     # 측정 지표는 모두 info dict 기반이라 reward 값 자체는 안 쓰이지만, env 가 학습 때와
     # 동일 reward_mode 로 돌고 CSV 의 reward_mode 컬럼이 실제 설정과 일치하도록 해소한다.
     if args.reward_mode is not None:
         reward_mode_effective = args.reward_mode
     else:
-        reward_mode_effective = train_meta.get("reward_mode", "diff-waiting-time")
+        reward_mode_effective = meta_for_env.get("reward_mode", "diff-waiting-time")
     print(f"[reward_mode={reward_mode_effective}]")
 
     env_kwargs = dict(
@@ -354,17 +369,17 @@ def main():
             return int(torch.distributions.Categorical(logits=logits).sample().item())
         return int(torch.argmax(logits, dim=-1).item())
 
-    def mappo_action(obs_dict, step_idx, agents):
+    def mappo_action(obs_dict, step_idx, env):
         return {
             agent: _select_action(
                 module.forward_inference(
                     {"obs": torch.tensor(obs_dict[agent][None], dtype=torch.float32)}
                 )["action_dist_inputs"]
             )
-            for agent in agents
+            for agent in env.agents
         }
 
-    def ctde_action(obs_dict, step_idx, agents):
+    def ctde_action(obs_dict, step_idx, env):
         """CTDE 모델 — obs 는 flat Box [local | global concat].
 
         모듈이 forward 시 첫 local_dim 차원만 slice 해 actor 에 사용
@@ -376,13 +391,16 @@ def main():
                     {"obs": torch.tensor(obs_dict[agent][None], dtype=torch.float32)}
                 )["action_dist_inputs"]
             )
-            for agent in agents
+            for agent in env.agents
         }
 
-    def fixed_action(obs_dict, step_idx, agents):
-        # 균등 N-step 사이클: 3 step × delta_time 5 = 15s/phase
+    def fixed_action(obs_dict, step_idx, env):
+        # 균등 N-step 사이클: 3 step × delta_time 5 = green 15s + yellow 3s = 실 18s/phase.
+        # 의도적으로 step-기반 유지 — sim-time 화하면 phase 당 green 이 15−3=12s 로
+        # min_green(13) 미달 → 전환 묵살 + phase 스킵 위험. 합성 베이스라인이라
+        # 실측 충실도 무관, 자체 일관성이 우선.
         phase = int((step_idx // 3) % 4)
-        return {agent: phase for agent in agents}
+        return {agent: phase for agent in env.agents}
 
     # ─ 세종시 실측 신호 타이밍 — 3x2-brt agent별 실측 데이터 ─────────────
     # 출처:
@@ -406,19 +424,23 @@ def main():
         "tl_5": [45, 20, 35, 20],  # 가름로 (갈매, 세담터2026)
     }
 
-    def _phase_from_secs(phase_secs, step_idx, dt):
-        """주어진 phase_secs (NS_SR, NS_L, EW_SR, EW_L) 와 step_idx → phase 인덱스.
+    def _phase_from_secs(phase_secs, sim_sec):
+        """주어진 phase_secs (NS_SR, NS_L, EW_SR, EW_L) 와 시뮬레이션 초 → phase 인덱스.
 
-        초 → step 환산 (내림, 최소 1 step), cycle 모듈로 후 boundary 검색.
+        **sim-time 기반**: cycle_pos = sim_sec % Σphase_secs 후 경계 검색. 과거
+        step_idx 기반(1 step=delta_time 가정)은 전환 step 이 yellow 3s 를 추가
+        시뮬레이션해 사이클이 +12s/cycle (~9%) 늘어났음 — sim-time 매핑은 yellow 가
+        다음 phase 의 green 을 잠식해(실제 신호처럼) 실측 사이클 길이를 그대로 재현.
+        경계 감지는 env step 시작 시점이라 ≤ delta_time(5s) 지연될 수 있으나 절대
+        sim-time 매핑이라 지연이 누적되지 않음.
         """
-        phase_steps = [max(1, s // dt) for s in phase_secs]
-        cycle_len = sum(phase_steps)
+        cycle_len = sum(phase_secs)
         boundaries = []
         acc = 0
-        for s in phase_steps:
+        for s in phase_secs:
             boundaries.append(acc)
             acc += s
-        cycle_pos = step_idx % cycle_len
+        cycle_pos = sim_sec % cycle_len
         phase = 0
         for i in range(len(boundaries) - 1, -1, -1):
             if cycle_pos >= boundaries[i]:
@@ -426,17 +448,17 @@ def main():
                 break
         return phase
 
-    def fixed_action_sejong(obs_dict, step_idx, agents):
+    def fixed_action_sejong(obs_dict, step_idx, env):
         """세종시 실제 신호 타이밍 기반 Fixed-Time 베이스라인 (per-agent 비대칭).
 
         SEJONG_PER_TLS_PHASE_SECONDS dict의 agent별 실측 신호 적용 (3x2-brt 6 TLS).
-        모든 phase는 min_green(13s) 이상임이 확인됨.
+        모든 phase ≥ 20s → yellow 3s 잠식 후에도 green ≥ 17s ≥ min_green(13) 이라
+        전환 묵살 없음.
         """
-        dt = args.delta_time
         result = {}
-        for agent in agents:
+        for agent in env.agents:
             secs = SEJONG_PER_TLS_PHASE_SECONDS.get(agent, [33, 20, 33, 20])
-            result[agent] = _phase_from_secs(secs, step_idx, dt)
+            result[agent] = _phase_from_secs(secs, env.sim_step)
         return result
 
     baseline_fn = fixed_action_sejong if args.baseline == "sejong" else fixed_action
@@ -449,13 +471,12 @@ def main():
         for ep in range(args.episodes):
             seed = args.seed + ep
 
-            # --sample 모드: episode 별 torch 시드 고정 → Categorical sampling 재현 가능
-            # (env seed 와 별도로 torch 난수 stream 을 episode 마다 reset)
-            if args.sample:
-                torch.manual_seed(seed)
-
             # ── MAPPO (--model 지정 시에만) ───────────────────────────────────
             if env_mappo is not None:
+                # --sample: 알고리즘별 실행 직전 재시드 → MAPPO 의 draw 수가 CTDE 의
+                # 추첨에 영향 주지 않게 stream 독립화 (같은 seed 재사용 = 재현성 유지)
+                if args.sample:
+                    torch.manual_seed(seed)
                 info = run_episode(env_mappo, mappo_action, seed=seed)
                 rows.append(_row_from_info("MAPPO", ep, seed, info))
                 r = rows[-1]
@@ -476,6 +497,8 @@ def main():
 
             # ── CTDE (선택, 동일 seed) ────────────────────────────────────────
             if env_ctde is not None:
+                if args.sample:
+                    torch.manual_seed(seed)  # MAPPO 와 독립된 동일 시작점
                 info = run_episode(env_ctde, ctde_action, seed=seed)
                 rows.append(_row_from_info("CTDE", ep, seed, info))
                 r = rows[-1]

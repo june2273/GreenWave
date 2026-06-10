@@ -41,17 +41,18 @@ SEJONG_PER_TLS_PHASE_SECONDS = {
 }
 
 
-def _phase_from_secs(phase_secs, step_idx, dt):
-    """[NS_SR, NS_L, EW_SR, EW_L] (초) + 현재 step_idx → phase 인덱스 (0~3).
-    evaluate_mappo.py 의 동명 함수와 동일. 초→step 환산은 floor + 최소 1 step.
+def _phase_from_secs(phase_secs, sim_sec):
+    """[NS_SR, NS_L, EW_SR, EW_L] (초) + 시뮬레이션 초 → phase 인덱스 (0~3).
+    evaluate_mappo.py 의 동명 함수와 동일 (1:1 복제 유지). **sim-time 기반** —
+    step_idx 기반은 전환 step 의 yellow 3s 추가 시뮬레이션으로 사이클이 ~9% 늘어났음.
+    yellow 가 다음 phase 의 green 을 잠식해 실측 사이클 길이를 그대로 재현한다.
     """
-    phase_steps = [max(1, s // dt) for s in phase_secs]
-    cycle_len = sum(phase_steps)
+    cycle_len = sum(phase_secs)
     boundaries, acc = [], 0
-    for s in phase_steps:
+    for s in phase_secs:
         boundaries.append(acc)
         acc += s
-    cycle_pos = step_idx % cycle_len
+    cycle_pos = sim_sec % cycle_len
     phase = 0
     for i in range(len(boundaries) - 1, -1, -1):
         if cycle_pos >= boundaries[i]:
@@ -117,22 +118,21 @@ def _default_output(baseline: str, map_name: str) -> str:
 def main():
     args = parse_args()
 
-    # ── 정책 함수 정의 ───────────────────────────────────────────
+    # ── 정책 함수 정의 (evaluate_mappo.py 의 fixed_action/fixed_action_sejong 와 1:1) ──
     if args.baseline == "symmetric":
-        def policy_fn(step_idx, agents):
-            # 균등 N-step 사이클: 3 step × delta_time 5 = 15s/phase
+        def policy_fn(step_idx, env):
+            # 균등 N-step 사이클: 3 step × delta_time 5 = green 15s + yellow 3s = 실 18s/phase.
+            # 의도적으로 step-기반 — sim-time 화하면 green 12s < min_green(13) 으로 전환 묵살.
             phase = int((step_idx // 3) % 4)
-            return {agent: phase for agent in agents}
+            return {agent: phase for agent in env.agents}
         label = "FixedTime(Symmetric)"
     else:  # sejong
-        dt = args.delta_time
-
-        # per-TLS 실측 — agent 별 다른 cycle
-        def policy_fn(step_idx, agents):
+        # per-TLS 실측 — agent 별 다른 cycle. sim-time 기반 (실측 사이클 그대로).
+        def policy_fn(step_idx, env):
             result = {}
-            for agent in agents:
+            for agent in env.agents:
                 secs = SEJONG_PER_TLS_PHASE_SECONDS.get(agent, [33, 20, 33, 20])
-                result[agent] = _phase_from_secs(secs, step_idx, dt)
+                result[agent] = _phase_from_secs(secs, env.sim_step)
             return result
         label = "FixedTime(Sejong)"
 
@@ -179,7 +179,7 @@ def main():
         step_idx = 0
         last_info = {}
         while env.agents:
-            actions = policy_fn(step_idx, env.agents)
+            actions = policy_fn(step_idx, env)
             obs_dict, _, _, _, info_dict = env.step(actions)
             if args.mode == "short":
                 frames.append(env.render())

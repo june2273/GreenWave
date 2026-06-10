@@ -306,7 +306,11 @@ def _restore_algo(config, resume_path: str, weights_only: bool):
     from ray.rllib.core.rl_module.rl_module import RLModule
     loaded_module = RLModule.from_checkpoint(str(rl_module_path))
     state = loaded_module.get_state()
-    # Learner 에 weights 주입
+    # Learner 에 weights 주입.
+    # legacy ckpt(value_norm 키 없음) → value_norm 모듈로 resume 시: TorchRLModule.
+    # set_state 가 strict=False 로 load 하고 learner 모듈은 inference_only=False 라
+    # missing key(정규화 버퍼)에 에러 없이 초기값 유지 → 첫 update 부터 debias 로
+    # unbiased 하게 측정 시작 (ray 2.55.1 torch_rl_module.py set_state 확인).
     algo.learner_group.set_state({
         "learner": {"rl_module": {"shared_policy": state}}
     })
@@ -439,7 +443,8 @@ def parse_args():
                         "MAPPO·CTDE 공통. CLAUDE.md 'Value-function 학습 붕괴' 참조.")
     p.add_argument("--vn-beta", type=float, default=None,
                    help="ValueNorm running-stat EMA decay. 미명시 시 metadata 값 "
-                        "(없으면 MAPPO 표준 0.99999). 느릴수록 σ 안정(denorm 예측·explained_var 노이즈↓).")
+                        "(없으면 MAPPO 표준 0.99999). regime shift(dense resume)에서 σ-clip "
+                        "재동결 시 0.9999 등으로 하향 (근거·한계: value_norm.py).")
     return p.parse_args()
 
 
@@ -528,8 +533,17 @@ def main():
     # value-target normalization (MAPPO ValueNorm). 미명시 시 metadata 값(없으면 on).
     # on 이면 vf_clip 은 σ-단위(default 10), off 면 real-space(default 1000).
     value_norm = bool(_pick(args.value_norm, "value_norm", True))
-    vn_beta = float(_pick(args.vn_beta, "vn_beta", 0.99999))  # MAPPO 표준(σ 안정)
+    vn_beta = float(_pick(args.vn_beta, "vn_beta", 0.99999))  # MAPPO 표준 정렬 (근거·한계: value_norm.py)
     _vf_clip_default = 10.0 if value_norm else 1000.0
+    # vf_clip 의 metadata 상속은 value_norm 상태가 같을 때만 유효 — 단위가 다르다
+    # (on=σ-단위 / off=real-space). 레거시(off/키없음) ckpt 를 value_norm on 으로
+    # resume 하며 1000 을 상속하면 σ-공간에서 사실상 unclip(프로브 불안정 모드)이
+    # 되는 footgun 차단: 상태 불일치 시 metadata 값 무시하고 단위에 맞는 default.
+    if bool(resume_meta.get("value_norm", False)) != value_norm and "vf_clip_param" in resume_meta:
+        print(f"[resume] value_norm 상태 변경 → metadata vf_clip_param"
+              f"({resume_meta['vf_clip_param']}) 무시, default {_vf_clip_default} 사용"
+              f" (단위 불일치: σ-단위 vs real-space)")
+        resume_meta = {k: v for k, v in resume_meta.items() if k != "vf_clip_param"}
 
     hparams = dict(
         lr=_pick(args.lr, "lr", 1e-4),

@@ -94,22 +94,24 @@ def parse_args():
     p.add_argument("--yellow-time", type=int, default=3)
     p.add_argument("--map", type=str, default="single", choices=MAP_CHOICES,
                    help="시나리오 사전셋. 학습 시 사용한 --map 과 일치해야 함.")
-    p.add_argument("--reward-mode", type=str, default="diff-waiting-time",
+    p.add_argument("--reward-mode", type=str, default=None,
                    choices=["diff-waiting-time", "pressure"],
                    help="보상 모드 (영상 자체엔 영향 없음 — 정책 추론만, env 진단용). "
-                        "diff-waiting-time / pressure. 학습 시와 동일하게 지정.")
+                        "미지정 시 model 의 train_metadata.json 값 자동 로드 "
+                        "(없으면 diff-waiting-time). 명시 시 metadata 보다 우선.")
     p.add_argument("--sumo-cfg", type=str, default=None,
                    help="SUMO 설정 파일 경로 (학습 시와 동일하게 지정)")
     p.add_argument("--traffic", type=str, default="default",
                    choices=["default", "high"],
                    help="2x2grid 트래픽 강도 사전셋 (default/high). "
                         "high 선택 시 --sumo-cfg 미지정이면 2x2grid_dense.sumocfg 자동 사용.")
-    p.add_argument("--brt-weight", type=float, default=1.0,
-                   help="env 에 전달할 BRT 가중치 (학습 시와 동일 권장). "
-                        "영상 자체에는 영향 없음 (정책 추론만), reward 진단용.")
-    p.add_argument("--time-to-teleport", type=int, default=300,
-                   help="SUMO 텔레포트 임계 (초). 학습·평가와 동일 값 사용 권장 "
-                        "(300=기본, -1=비활성). 영상이 eval 과 같은 거동을 묘사하도록 동기화.")
+    p.add_argument("--brt-weight", type=float, default=None,
+                   help="env 에 전달할 BRT 가중치. 미지정 시 model 의 train_metadata.json "
+                        "값 자동 로드 (없으면 1.0). 영상 자체에는 영향 없음 (정책 추론만), "
+                        "reward 진단용.")
+    p.add_argument("--time-to-teleport", type=int, default=None,
+                   help="SUMO 텔레포트 임계 (초). 미지정 시 model 의 train_metadata.json "
+                        "값 자동 로드 (없으면 300). 영상이 eval 과 같은 거동을 묘사하도록 동기화.")
     p.add_argument("--dump-metrics", type=str, default=None,
                    help="프레임별 실시간 지표 (co2_kg/avg_wait/cur_wait/throughput) 를 "
                         "JSON 으로 저장. frames 와 1:1 정렬됨 (3-way 비교 영상 오버레이용).")
@@ -147,6 +149,27 @@ def main():
     )
     print(f"[map={args.map}] sumo_cfg={sumo_cfg_effective} tls_ids={tls_ids_effective}")
 
+    # train_metadata.json 로드 — neighbor_obs/upstream_phase(obs 차원 일치 필수) +
+    # reward_mode/brt_weight/time_to_teleport fallback (evaluate 와 동일 우선순위:
+    # CLI 명시 > metadata > default).
+    _meta: dict = {}
+    _meta_path = Path(args.model).resolve() / "train_metadata.json"
+    if _meta_path.exists():
+        try:
+            _meta = json.loads(_meta_path.read_text())
+        except Exception as e:
+            # 조용히 넘기면 obs 차원 불일치(actor mat-mul 에러)로 이어지므로 경고 노출.
+            print(f"[WARN] train_metadata.json 읽기 실패 ({type(e).__name__}: {e}) "
+                  f"→ neighbor_obs/upstream_phase 미적용. obs 차원 불일치 가능.")
+
+    reward_mode_effective = args.reward_mode or _meta.get("reward_mode", "diff-waiting-time")
+    brt_weight_effective = (args.brt_weight if args.brt_weight is not None
+                            else float(_meta.get("brt_weight", 1.0)))
+    ttt_effective = (args.time_to_teleport if args.time_to_teleport is not None
+                     else int(_meta.get("time_to_teleport", 300)))
+    print(f"[reward_mode={reward_mode_effective}] [brt_weight={brt_weight_effective}] "
+          f"[time_to_teleport={ttt_effective}]")
+
     env_kwargs = dict(
         use_gui=False,
         delta_time=args.delta_time,
@@ -154,24 +177,16 @@ def main():
         yellow_time=args.yellow_time,
         max_steps=args.max_steps,
         tls_ids=tls_ids_effective,
-        reward_mode=args.reward_mode,
-        brt_weight=args.brt_weight,
-        time_to_teleport=args.time_to_teleport,
+        reward_mode=reward_mode_effective,
+        brt_weight=brt_weight_effective,
+        time_to_teleport=ttt_effective,
+        # neighbor_obs / upstream_phase 로 학습된 모델은 actor 가 enriched local obs
+        # (+이웃 요약·위상)를 기대하므로 추론 env 도 동일하게 켜야 한다.
+        neighbor_obs=bool(_meta.get("neighbor_obs", False)),
+        upstream_phase=bool(_meta.get("upstream_phase", False)),
     )
     if sumo_cfg_effective:
         env_kwargs["sumo_cfg"] = sumo_cfg_effective
-    # neighbor_obs / upstream_phase 로 학습된 모델은 actor 가 enriched local obs(+이웃 요약·
-    # 위상)를 기대하므로 추론 env 도 동일하게 켜야 한다 (local obs 차원 일치 필요).
-    _meta_path = Path(args.model).resolve() / "train_metadata.json"
-    if _meta_path.exists():
-        try:
-            _m = json.loads(_meta_path.read_text())
-            env_kwargs["neighbor_obs"] = bool(_m.get("neighbor_obs", False))
-            env_kwargs["upstream_phase"] = bool(_m.get("upstream_phase", False))
-        except Exception as e:
-            # 조용히 넘기면 obs 차원 불일치(actor mat-mul 에러)로 이어지므로 경고 노출.
-            print(f"[WARN] train_metadata.json 읽기 실패 ({type(e).__name__}: {e}) "
-                  f"→ neighbor_obs/upstream_phase 미적용. obs 차원 불일치 가능.")
     env = SumoParallelEnv(**env_kwargs)
 
     # 렌더 타이틀 라벨: 체크포인트 train_metadata.json 에서 MAPPO/CTDE + iter 추출

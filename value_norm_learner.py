@@ -109,6 +109,8 @@ class ValueNormPPOTorchLearner(PPOTorchLearner):
             if value_normalizer is not None:
                 _, std = value_normalizer.stats()
                 # 정규화 단위 손실: ((v − G)/σ)². μ 는 차분에서 상쇄(=z − normalize(G)).
+                # std 는 float64 버퍼(캔슬레이션 방지) → 손실 dtype 오염 방지 위해 캐스트.
+                std = std.to(value_fn_out.dtype)
                 vf_loss = torch.pow((value_fn_out - value_targets) / std, 2.0)
             else:
                 # 정규화기 없음(legacy 모듈) → 표준 제곱손실 (방어적 fallback).

@@ -1,4 +1,3 @@
-import functools
 import math
 import os
 import shutil
@@ -14,6 +13,7 @@ from pettingzoo import ParallelEnv
 
 try:
     import traci
+    import traci.constants as tc
     from sumolib import checkBinary
 except ImportError as exc:
     raise ImportError(
@@ -30,6 +30,27 @@ except ImportError:
 # SUMO 기본 차량 길이(5m) + min_gap(2.5m) 기반 lane 용량 추정 상수
 # obs density/queue 정규화에 사용 — 정확치는 아니지만 [0,1] 근사 보장
 _VEHICLE_FOOTPRINT_M = 7.5
+
+# ── TraCI subscription 변수 목록 (per-vehicle/lane 폴링 → 구독 일괄수신) ──────
+# 과거 _simulate_seconds 가 매 sim-second 차량당 4~5회 개별 TraCI 호출(IPC)을 해
+# LOS D(~1,400대)에서 초당 ~7,000 왕복 → rollout 병목의 주범이었다. 구독으로 바꾸면
+# simulationStep 직후 클라이언트에 일괄 저장되어 getAllSubscriptionResults() 는
+# IPC 없는 로컬 dict 조회가 된다. **수치 산출 로직은 불변** — 데이터 소스만 교체.
+_VEH_SUB_VARS = [
+    tc.VAR_SPEED,                       # Tier1 속도/정지 감지
+    tc.VAR_ACCUMULATED_WAITING_TIME,    # avg_waiting_time 지표 체인
+    tc.VAR_WAITING_TIME,                # brt_weight>1 reward 경로 (연속 정지시간)
+    tc.VAR_CO2EMISSION,                 # Tier1 CO2
+]
+# in-lane (controlled): obs density/queue + EW/NS wait + 차량 ID (brt/corridor 경로)
+_LANE_IN_SUB_VARS = [
+    tc.LAST_STEP_VEHICLE_HALTING_NUMBER,
+    tc.VAR_WAITING_TIME,
+    tc.LAST_STEP_VEHICLE_NUMBER,
+    tc.LAST_STEP_VEHICLE_ID_LIST,
+]
+# 경계 out-lane (어느 TLS 의 in-lane 도 아닌 네트워크 출구): pressure 의 차량 수만
+_LANE_OUT_SUB_VARS = [tc.LAST_STEP_VEHICLE_NUMBER]
 
 
 class SumoParallelEnv(ParallelEnv):
@@ -223,6 +244,10 @@ class SumoParallelEnv(ParallelEnv):
         self._corridor_agents: List[str] = spec["corridor_agents"]
         self._corridor_ns_lanes: Dict[str, List[str]] = spec["corridor_ns_lanes"]
 
+        # obs/act space 캐시 (observation_space()/action_space() 가 lazy 생성)
+        self._obs_space: Optional[spaces.Space] = None
+        self._act_space: Optional[spaces.Space] = None
+
         # agents: 현재 에피소드 활성 에이전트
         self.agents: List[str] = []
 
@@ -245,6 +270,11 @@ class SumoParallelEnv(ParallelEnv):
         self.conn = None
         self._conn_label: Optional[str] = None
         self.sim_step: int = 0
+
+        # subscription 보조 캐시 — vClass 는 차량당 정적(첫 등장 시 1회 조회, reset 마다
+        # clear), lane max speed 는 net 정적(에피소드 간 유지).
+        self._vehicle_class: Dict[str, str] = {}
+        self._lane_max_speed: Dict[str, float] = {}
 
         # 에피소드 지표 버퍼
         self._depart_time: Dict[str, int] = {}
@@ -363,30 +393,35 @@ class SumoParallelEnv(ParallelEnv):
     # PettingZoo 필수 인터페이스 — obs/act space 동적 결정
     # ------------------------------------------------------------------
 
-    @functools.lru_cache(maxsize=None)
     def observation_space(self, agent: str) -> spaces.Space:
-        if not self.ctde_mode:
-            return spaces.Box(
-                low=0.0, high=1.0,
-                shape=(self._obs_dim,), dtype=np.float32,
-            )
-        # CTDE: 단일 flat Box (Dict obs 는 RLlib worker connector 에서 silent fail).
-        # 첫 _obs_dim 차원 = 자기 local → CentralizedCriticPPOModule 이 slice.
-        n_agents = len(self.possible_agents)
-        if self.neighbor_obs:
-            # (#1) [own | agent_id one-hot(N) | N/E/S/W 이웃 obs(_obs_dim × 4)]
-            total_dim = self._obs_dim + n_agents + self._obs_dim * len(self._NEIGHBOR_DIRS)
-        else:
-            # legacy: [own | 전체 agent obs concat(_obs_dim × N)]
-            total_dim = self._obs_dim + self._obs_dim * n_agents
-        return spaces.Box(
-            low=0.0, high=1.0,
-            shape=(total_dim,), dtype=np.float32,
-        )
+        # 모든 agent 동일 space. 인스턴스 속성 캐시 — 과거 @lru_cache(인스턴스 메서드)는
+        # 전역 캐시가 self 를 영구 참조해 env 가 GC 되지 않는 누수가 있었음.
+        if self._obs_space is None:
+            if not self.ctde_mode:
+                self._obs_space = spaces.Box(
+                    low=0.0, high=1.0,
+                    shape=(self._obs_dim,), dtype=np.float32,
+                )
+            else:
+                # CTDE: 단일 flat Box (Dict obs 는 RLlib worker connector 에서 silent fail).
+                # 첫 _obs_dim 차원 = 자기 local → CentralizedCriticPPOModule 이 slice.
+                n_agents = len(self.possible_agents)
+                if self.neighbor_obs:
+                    # (#1) [own | agent_id one-hot(N) | N/E/S/W 이웃 obs(_obs_dim × 4)]
+                    total_dim = self._obs_dim + n_agents + self._obs_dim * len(self._NEIGHBOR_DIRS)
+                else:
+                    # legacy: [own | 전체 agent obs concat(_obs_dim × N)]
+                    total_dim = self._obs_dim + self._obs_dim * n_agents
+                self._obs_space = spaces.Box(
+                    low=0.0, high=1.0,
+                    shape=(total_dim,), dtype=np.float32,
+                )
+        return self._obs_space
 
-    @functools.lru_cache(maxsize=None)
     def action_space(self, agent: str) -> spaces.Space:
-        return spaces.Discrete(self._num_green)
+        if self._act_space is None:
+            self._act_space = spaces.Discrete(self._num_green)
+        return self._act_space
 
     # ------------------------------------------------------------------
     # Lane 방향 분류 — 평가 지표 per_direction_wait 용
@@ -429,15 +464,30 @@ class SumoParallelEnv(ParallelEnv):
         같은 1-pass 로 BRT-only 속도비 metric 도 누적한다 (progression_coeff 와 무관하게
         항상 기록 → baseline 대비 회랑 진행파 정량 비교용 corridor_brt_speed_ratio).
         """
+        lane_res = self.conn.lane.getAllSubscriptionResults()
+        veh_res = self.conn.vehicle.getAllSubscriptionResults()
         num = 0.0
         den = 0.0
         for ln in self._corridor_ns_lanes.get(agent, []):
-            vmax = self.conn.lane.getMaxSpeed(ln)
+            vmax = self._lane_max_speed.get(ln)
+            if vmax is None:  # net 정적 → 최초 1회만 조회
+                vmax = self.conn.lane.getMaxSpeed(ln)
+                self._lane_max_speed[ln] = vmax
             if vmax <= 1e-6:
                 continue
-            for vid in self.conn.lane.getLastStepVehicleIDs(ln):
-                is_bus = self.conn.vehicle.getVehicleClass(vid) == "bus"
-                ratio = min(1.0, self.conn.vehicle.getSpeed(vid) / vmax)
+            lr = lane_res.get(ln)
+            vids = (lr[tc.LAST_STEP_VEHICLE_ID_LIST] if lr is not None
+                    else self.conn.lane.getLastStepVehicleIDs(ln))
+            for vid in vids:
+                vcls = self._vehicle_class.get(vid)
+                if vcls is None:
+                    vcls = self.conn.vehicle.getVehicleClass(vid)
+                    self._vehicle_class[vid] = vcls
+                is_bus = vcls == "bus"
+                vr = veh_res.get(vid)
+                spd = (float(vr[tc.VAR_SPEED]) if vr is not None
+                       else float(self.conn.vehicle.getSpeed(vid)))
+                ratio = min(1.0, spd / vmax)
                 w = self.brt_prog_weight if is_bus else 1.0
                 num += w * ratio
                 den += w
@@ -769,34 +819,77 @@ class SumoParallelEnv(ParallelEnv):
             binary, "-c", str(self.sumo_cfg),
             "--no-warnings", "true",
             "--time-to-teleport", str(self.time_to_teleport),
+            # getAccumulatedWaitingTime 의 집계 윈도우. SUMO 기본 100s 는 LOS D 에서
+            # 차량당 대기시간을 ~100s 로 포화시켜 avg_waiting_time 지표를 왜곡한다
+            # (에피소드 3600s 전체를 덮도록 10000s — SUMO-RL 관례와 동일).
+            "--waiting-time-memory", "10000",
             "--seed", str(0 if seed is None else seed),
         ]
         traci.start(cmd, label=self._conn_label)
         self.conn = traci.getConnection(self._conn_label)
         # lane / phase 스펙은 __init__의 probe 결과를 재사용 (재추출 불필요)
 
+    def _subscribe_lanes(self) -> None:
+        """lane subscription 설치 (SUMO 프로세스가 reset 마다 새로 떠서 매번 재설치).
+
+        in-lane(controlled 합집합)은 obs/지표/brt·corridor 경로용 4개 변수,
+        경계 out-lane(어느 in-lane 도 아님)은 pressure 의 차량 수만 구독.
+        같은 lane 을 두 번 subscribe 하면 변수 목록이 *덮어써지므로* 집합을 분리한다.
+        """
+        in_set = set(self._lane_ids)
+        for ln in self._lane_ids:
+            self.conn.lane.subscribe(ln, _LANE_IN_SUB_VARS)
+        out_only = {
+            ln
+            for agent in self.possible_agents
+            for ln in self._per_agent_out_lanes[agent]
+        } - in_set
+        for ln in out_only:
+            self.conn.lane.subscribe(ln, _LANE_OUT_SUB_VARS)
+
     # 정지 transition 감지 임계 (m/s). SUMO 기본 차량 모델 기준 정지 직전/후 ≈ 0.
     _STOP_SPEED_THRESHOLD = 0.1
 
     def _simulate_seconds(self, num_seconds: int) -> Tuple[bool, int]:
-        """num_seconds만큼 시뮬레이션 진행; (done, 실제_진행_초) 반환"""
+        """num_seconds만큼 시뮬레이션 진행; (done, 실제_진행_초) 반환.
+
+        per-vehicle 값은 subscription 일괄수신(getAllSubscriptionResults — IPC 없는
+        로컬 조회)으로 읽는다. 순회 집합은 기존과 동일하게 getIDList() 기준
+        (텔레포트 중 차량 제외 의미 보존). 구독 결과가 없는 차량(이론상 희귀)은
+        기존 개별 호출로 폴백 — 수치 산출 로직은 폴링 시절과 동일.
+        """
         for progressed in range(1, num_seconds + 1):
             self.conn.simulationStep()
             self.sim_step += 1
 
+            # 신규 출발 차량 구독 + vClass 1회 캐시 (subscribe 응답이 현재 step 값을
+            # 즉시 포함 → 같은 step 에 바로 읽기 가능. bit-identical 게이트로 검증됨.)
+            for veh_id in self.conn.simulation.getDepartedIDList():
+                self.conn.vehicle.subscribe(veh_id, _VEH_SUB_VARS)
+                if veh_id not in self._vehicle_class:
+                    self._vehicle_class[veh_id] = (
+                        self.conn.vehicle.getVehicleClass(veh_id)
+                    )
+            veh_res = self.conn.vehicle.getAllSubscriptionResults()
+
             for veh_id in self.conn.vehicle.getIDList():
                 if veh_id not in self._depart_time:
                     self._depart_time[veh_id] = self.sim_step
-                wait_acc = float(
-                    self.conn.vehicle.getAccumulatedWaitingTime(veh_id)
-                )
+                r = veh_res.get(veh_id)
+                if r is not None:
+                    wait_acc = float(r[tc.VAR_ACCUMULATED_WAITING_TIME])
+                    speed = float(r[tc.VAR_SPEED])
+                    co2 = float(r[tc.VAR_CO2EMISSION])
+                else:  # 구독 누락 폴백 (기존 폴링 경로와 동일 호출)
+                    wait_acc = float(self.conn.vehicle.getAccumulatedWaitingTime(veh_id))
+                    speed = float(self.conn.vehicle.getSpeed(veh_id))
+                    co2 = float(self.conn.vehicle.getCO2Emission(veh_id))
                 self._latest_waiting[veh_id] = wait_acc
                 # Green Wave Tier 1 지표: speed + CO2 + 정지 횟수
-                speed = float(self.conn.vehicle.getSpeed(veh_id))
                 self._episode_speed_sum += speed
                 self._episode_speed_sq_sum += speed * speed
                 self._episode_speed_count += 1
-                self._episode_co2_sum += float(self.conn.vehicle.getCO2Emission(veh_id))
+                self._episode_co2_sum += co2
                 self._vehicle_seen.add(veh_id)
                 # 정지 transition: prev > 임계 AND 현재 ≤ 임계
                 prev = self._vehicle_prev_speed.get(veh_id, speed)
@@ -807,14 +900,13 @@ class SumoParallelEnv(ParallelEnv):
                 self._vehicle_prev_speed[veh_id] = speed
 
                 # BRT/일반 차량 분리 누적 (BRT 우선처리 평가 metric).
-                # vClass 가 "bus" 면 BRT, 그 외 ("passenger" 등) 일반 차량.
-                # getVehicleClass 1회 추가 호출만 발생. 시나리오와 무관하게 항상 동작 —
-                # 비-BRT 시나리오(single/2x2/3x2)는 brt_count 가 0 으로 누적되므로
-                # info 의 avg_wait_brt 는 0.0 으로 자연스럽게 표시됨.
-                is_brt = (
-                    self.conn.vehicle.getVehicleClass(veh_id) == "bus"
-                )
-                if is_brt:
+                # vClass 는 정적이라 첫 등장 시 1회 캐시. 비-BRT 시나리오는 brt_count=0
+                # 으로 누적 → info 의 avg_wait_brt 는 0.0 으로 자연 표시.
+                vcls = self._vehicle_class.get(veh_id)
+                if vcls is None:
+                    vcls = self.conn.vehicle.getVehicleClass(veh_id)
+                    self._vehicle_class[veh_id] = vcls
+                if vcls == "bus":
                     self._episode_brt_wait_sum += wait_acc
                     self._episode_brt_wait_count += 1
                     self._episode_brt_speed_sum += speed
@@ -836,28 +928,31 @@ class SumoParallelEnv(ParallelEnv):
                         float(self._latest_waiting.pop(veh_id))
                     )
 
-            # lane별 halting cumsum + max_queue 추적
-            halting_per_lane = [
-                float(self.conn.lane.getLastStepHaltingNumber(ln))
-                for ln in self._lane_ids
-            ]
-            self._queue_cumsum += sum(halting_per_lane)
-            if halting_per_lane:
-                step_max = max(halting_per_lane)
-                if step_max > self._episode_max_queue:
-                    self._episode_max_queue = step_max
-
-            # Green Wave Tier 2 지표: 방향별 대기시간 (lane.getWaitingTime → 누적)
-            # 매 step lane.getWaitingTime 은 그 lane 의 현재 대기 차량 합. EW/NS 분리해
-            # episode 내 평균을 후속에서 계산.
+            # lane별 halting cumsum + max_queue + 방향별 대기시간 — lane 구독 일괄수신.
+            lane_res = self.conn.lane.getAllSubscriptionResults()
+            halting_per_lane = []
             for ln in self._lane_ids:
-                w = float(self.conn.lane.getWaitingTime(ln))
+                lr = lane_res.get(ln)
+                if lr is not None:
+                    h = float(lr[tc.LAST_STEP_VEHICLE_HALTING_NUMBER])
+                    w = float(lr[tc.VAR_WAITING_TIME])
+                else:  # 구독 누락 폴백
+                    h = float(self.conn.lane.getLastStepHaltingNumber(ln))
+                    w = float(self.conn.lane.getWaitingTime(ln))
+                halting_per_lane.append(h)
+                # Green Wave Tier 2: lane.getWaitingTime 은 그 lane 의 현재 대기 차량 합.
+                # EW/NS 분리해 episode 내 평균을 후속에서 계산.
                 if self._lane_direction.get(ln, "ew") == "ew":
                     self._episode_wait_ew_sum += w
                     self._episode_wait_ew_count += 1
                 else:
                     self._episode_wait_ns_sum += w
                     self._episode_wait_ns_count += 1
+            self._queue_cumsum += sum(halting_per_lane)
+            if halting_per_lane:
+                step_max = max(halting_per_lane)
+                if step_max > self._episode_max_queue:
+                    self._episode_max_queue = step_max
 
             self._episode_teleported += int(
                 self.conn.simulation.getStartingTeleportNumber()
@@ -916,14 +1011,22 @@ class SumoParallelEnv(ParallelEnv):
             1.0 if self._elapsed_phase_time[agent] >= self.min_green else 0.0
         )
 
-        # lane별 raw queue 1회 조회 → 캐시 + obs 정규화 양쪽에 재사용 (traci 호출 절약)
+        # lane별 raw queue/차량수 — lane 구독 결과(로컬 dict, IPC 없음)에서 조회.
+        # 직전 simulationStep 의 값 = 기존 개별 호출과 동일 시점.
+        lane_res = self.conn.lane.getAllSubscriptionResults()
         raw_queue = [
-            float(self.conn.lane.getLastStepHaltingNumber(ln)) for ln in lanes
+            float(lane_res[ln][tc.LAST_STEP_VEHICLE_HALTING_NUMBER])
+            if ln in lane_res
+            else float(self.conn.lane.getLastStepHaltingNumber(ln))
+            for ln in lanes
         ]
         self._last_queue_per_lane[agent] = raw_queue
 
         density = np.array([
-            min(1.0, self.conn.lane.getLastStepVehicleNumber(ln) / self._lane_capacities[ln])
+            min(1.0, (lane_res[ln][tc.LAST_STEP_VEHICLE_NUMBER]
+                      if ln in lane_res
+                      else self.conn.lane.getLastStepVehicleNumber(ln))
+                / self._lane_capacities[ln])
             for ln in lanes
         ], dtype=np.float32)
         queue = np.array([
@@ -1043,6 +1146,10 @@ class SumoParallelEnv(ParallelEnv):
     ):
         self.agents = list(self.possible_agents)
         self._start_sumo(seed=seed)
+        # lane subscription 은 SUMO 프로세스마다 재설치, vClass 캐시는 에피소드 단위.
+        # (_lane_max_speed 는 net 정적이라 유지.)
+        self._subscribe_lanes()
+        self._vehicle_class.clear()
 
         self.sim_step = 0
         self._depart_time.clear()
@@ -1138,6 +1245,13 @@ class SumoParallelEnv(ParallelEnv):
             done, yellow_progressed = self._simulate_seconds(self.yellow_time)
             # 옵션 C: 실제로 yellow phase 로 시뮬레이션된 sec 누적
             self._episode_yellow_seconds += int(yellow_progressed)
+            # 전환하지 않은 agent 는 이 yellow 구간에도 자기 green 을 유지했으므로
+            # 경과시간에 산입 (min_green 게이팅 + upstream_phase 의 elapsed_norm 위상
+            # 시계 정확화). 전환 agent 는 아래에서 0 으로 리셋되므로 가산해도 무관하나
+            # 의미 명확성을 위해 비전환 agent 에만 더한다.
+            for agent in self.agents:
+                if not switching[agent]:
+                    self._elapsed_phase_time[agent] += int(yellow_progressed)
 
         # 5. 목표 green phase 적용
         if not done:
@@ -1177,34 +1291,48 @@ class SumoParallelEnv(ParallelEnv):
             if self.reward_mode == "pressure":
                 # max-pressure: 하류 차량 수 - 상류 차량 수 (상태 기반).
                 # 하류가 포화일수록 reward 가 낮아져 스필백을 억제한다.
+                # lane 구독 결과 사용 (경계 out-lane 도 VEHICLE_NUMBER 구독됨).
+                lane_res = self.conn.lane.getAllSubscriptionResults()
+
+                def _veh_num(ln):
+                    lr = lane_res.get(ln)
+                    if lr is not None:
+                        return lr[tc.LAST_STEP_VEHICLE_NUMBER]
+                    return self.conn.lane.getLastStepVehicleNumber(ln)
+
                 out_lanes = self._per_agent_out_lanes[agent]
-                n_out = sum(
-                    self.conn.lane.getLastStepVehicleNumber(ln) for ln in out_lanes
-                )
-                n_in = sum(
-                    self.conn.lane.getLastStepVehicleNumber(ln) for ln in lanes
-                )
+                n_out = sum(_veh_num(ln) for ln in out_lanes)
+                n_in = sum(_veh_num(ln) for ln in lanes)
                 reward = float(n_out - n_in)
             else:
-                # diff-waiting-time: (이전 step 누적대기시간 - 현재) / 10.
-                # brt_weight == 1.0 이면 lane.getWaitingTime 합과 동일 (fast path),
-                # > 1.0 이면 vClass=bus 차량의 누적 대기시간만 w 배 가중한다.
+                # diff-waiting-time: (이전 step 대기시간 - 현재) / 10.
+                # 측정치는 두 경로 모두 *연속 정지시간*(vehicle.getWaitingTime; 움직이면
+                # 리셋) — lane.getWaitingTime == Σ vehicle.getWaitingTime 이므로
+                # brt_weight == 1.0 이면 fast path 와 수학적으로 동일하다.
+                # (과거 w>1 경로는 getAccumulatedWaitingTime(100s 윈도우 누적)을 써서
+                #  가중치 토글이 측정치 정의까지 바꾸는 버그가 있었음 — 통일 완료.)
                 if self.brt_weight == 1.0:
                     current_wait = sum(
                         self.conn.lane.getWaitingTime(ln) for ln in lanes
                     ) / 10.0
                 else:
+                    lane_res = self.conn.lane.getAllSubscriptionResults()
+                    veh_res = self.conn.vehicle.getAllSubscriptionResults()
                     weighted = 0.0
                     for ln in lanes:
-                        for vid in self.conn.lane.getLastStepVehicleIDs(ln):
-                            w = (
-                                self.brt_weight
-                                if self.conn.vehicle.getVehicleClass(vid) == "bus"
-                                else 1.0
-                            )
-                            weighted += w * float(
-                                self.conn.vehicle.getAccumulatedWaitingTime(vid)
-                            )
+                        lr = lane_res.get(ln)
+                        vids = (lr[tc.LAST_STEP_VEHICLE_ID_LIST] if lr is not None
+                                else self.conn.lane.getLastStepVehicleIDs(ln))
+                        for vid in vids:
+                            vcls = self._vehicle_class.get(vid)
+                            if vcls is None:
+                                vcls = self.conn.vehicle.getVehicleClass(vid)
+                                self._vehicle_class[vid] = vcls
+                            w = self.brt_weight if vcls == "bus" else 1.0
+                            vr = veh_res.get(vid)
+                            wt = (float(vr[tc.VAR_WAITING_TIME]) if vr is not None
+                                  else float(self.conn.vehicle.getWaitingTime(vid)))
+                            weighted += w * wt
                     current_wait = weighted / 10.0
                 reward = self._last_wait_measure.get(agent, current_wait) - current_wait
                 self._last_wait_measure[agent] = current_wait
