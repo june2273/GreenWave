@@ -17,11 +17,13 @@ from ray.rllib.utils.framework import try_import_torch
 torch, nn = try_import_torch()
 
 # 정규화기 하이퍼파라미터 (CLAUDE.md "Value-function 학습 붕괴" 참조).
-#   _VN_BETA   : running stat EMA decay. σ 추종 속도만 좌우(Adam 이 magnitude 흡수 → 영향 간접·소).
-#                cadence = minibatch 당 1회 update(~수백/iter). 0.99~0.9995 robust.
+#   _VN_BETA   : running stat EMA decay. **MAPPO 표준 0.99999** (per-minibatch update,
+#                ~수백/iter). 느린 EMA + debiasing → σ 가 minibatch 노이즈를 안 쫓아 안정 →
+#                denorm 스케일 일관 → explained_var 노이즈↓. (이전 0.999 는 너무 빨라 σ 출렁.)
+#                Adam 은 손실의 σ²-gradient 를 흡수하나 denorm 예측값(zσ+μ)엔 β 가 직접 영향.
 #   _VAR_FLOOR : variance 하한. cold-start 0除算 방지(steady state var≫이라 무관).
 #   _DEBIAS_EPS: debiasing term 하한.
-_VN_BETA = 0.999
+_VN_BETA = 0.99999
 _VAR_FLOOR = 1e-2
 _DEBIAS_EPS = 1e-5
 

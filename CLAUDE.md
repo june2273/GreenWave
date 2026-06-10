@@ -242,7 +242,7 @@ obs 레이아웃: base `[phase_onehot4, min_green1, density10, queue10]=25` + �
 | `entropy_coeff` | `0.03` | 좌회전 phase mode collapse 방지 (dense 시나리오 초기 음수 reward → collapse 억제). `--entropy-schedule START END` 로 선형 스케줄(예 `0.03 0.005`, 초반 탐색→후반 sharpening, 75% 지점에서 END 도달) 가능 — 새 API 스택은 `entropy_coeff=[[step,val],...]` 형식. `hparams` 공유라 MAPPO·CTDE 동일 적용 |
 | `vf_clip_param` | `10.0` (value_norm on) / `1000.0` (off) | **value_norm on(기본): σ-단위 outlier guard** (10=3.16σ, 스케일 독립). off: real-space legacy. `--vf-clip-param` override(미명시 시 metadata→default). `hparams` 공유라 MAPPO·CTDE 동일. **튜닝 전 아래 "Value-function 학습 붕괴" 섹션 필독.** |
 | `value_norm` | `True` | value-target normalization(MAPPO ValueNorm). 크리틱 정규화 출력→denorm, σ-단위 손실 → value 학습 붕괴 해소. `--no-value-norm` 으로 off. MAPPO·CTDE 공통 |
-| `vn_beta` | `0.999` | ValueNorm running-stat EMA decay (보조 노브; σ 추종 속도). `--vn-beta` override. Adam 흡수로 영향 간접·소 (활성 노브는 vf_clip) |
+| `vn_beta` | `0.99999` | ValueNorm running-stat EMA decay (MAPPO 표준). per-minibatch update + 느린 EMA → σ 안정 → denorm 예측·explained_var 노이즈↓. `--vn-beta` override. (Adam 은 손실 gradient 의 σ² 만 흡수; denorm 예측값엔 β 가 직접 영향) |
 | `yellow_time` | `3` | XML TLS 정의 및 세종시 실제 신호(3초)와 일치. 이전 값 2초로 학습된 모델은 `--yellow-time 2` 명시 |
 | `switch_penalty` | `0.45` | yellow 3초 × 1대/초 손실. yellow_time=2 기준 이전 모델 재사용 시 0.3 명시 |
 | `time_to_teleport` | `300` | SUMO 텔레포트 임계(초). deadlock 안전밸브. `-1`=비활성(과포화 시 영구 grid lock → 학습 불가). `--time-to-teleport` CLI. evaluate 는 metadata 자동 로드 |

@@ -438,8 +438,8 @@ def parse_args():
                         "미명시 시 metadata 값(없으면 on). 끄려면 --no-value-norm (legacy 거동). "
                         "MAPPO·CTDE 공통. CLAUDE.md 'Value-function 학습 붕괴' 참조.")
     p.add_argument("--vn-beta", type=float, default=None,
-                   help="ValueNorm running-stat EMA decay (보조 노브; σ 추종 속도). "
-                        "미명시 시 metadata 값 (없으면 0.999). 0.99~0.9995 robust.")
+                   help="ValueNorm running-stat EMA decay. 미명시 시 metadata 값 "
+                        "(없으면 MAPPO 표준 0.99999). 느릴수록 σ 안정(denorm 예측·explained_var 노이즈↓).")
     return p.parse_args()
 
 
@@ -528,7 +528,7 @@ def main():
     # value-target normalization (MAPPO ValueNorm). 미명시 시 metadata 값(없으면 on).
     # on 이면 vf_clip 은 σ-단위(default 10), off 면 real-space(default 1000).
     value_norm = bool(_pick(args.value_norm, "value_norm", True))
-    vn_beta = float(_pick(args.vn_beta, "vn_beta", 0.999))
+    vn_beta = float(_pick(args.vn_beta, "vn_beta", 0.99999))  # MAPPO 표준(σ 안정)
     _vf_clip_default = 10.0 if value_norm else 1000.0
 
     hparams = dict(
