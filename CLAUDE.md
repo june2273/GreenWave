@@ -53,13 +53,16 @@ python train_mappo.py --map 3x2-brt --ctde --neighbor-obs \
 python train_mappo.py --map 3x2-brt --traffic high --ctde --neighbor-obs \
   --resume-from models/CTDE_sejong_nb --resume-weights-only \
   --num-iters 65 --num-workers 5 --seed 42 --out models/CTDE_sejong_dense_nb        # Phase2 dense (+65→200)
-# 게이트 판정: new CTDE vs old CTDE(eval_sejong_dense_30.csv) — 성공 = throughput/travel 분산이
-#   MAPPO 수준으로 하락(고분산이 old CTDE 의 진짜 증상; avg_waiting 동률에 가려졌던 것).
+# 게이트 판정: new CTDE vs old CTDE(eval_sejong_dense_30_regen.csv) — 성공 = throughput/travel/wait
+#   분산이 MAPPO 수준으로 하락(고분산이 old CTDE 의 진짜 증상). 수정 지표(2026-06-11 재평가)
+#   기준치: 분산비(CTDE/MAPPO) throughput 6.4×(168.7 vs 26.4) · travel 2.8× · wait 3.6×.
+#   구 CSV 의 "avg_waiting 동률" 은 포화 인공물 — 수정 지표에선 old CTDE 가 헤드라인에서도
+#   유의하게 짐(97.7 vs 90.5, p=5.6e-09) → 게이트는 분산 하락 + 헤드라인 회복 둘 다 본다.
 #   확실히 개선되면 그때 MAPPO 도 --neighbor-obs 재학습해야 new-CTDE-vs-MAPPO 가 공정해짐.
-# ⚠️ eval_sejong_dense_30.csv 는 2026-06-11 지표 수정(waiting-time-memory 포화 해제 + sejong
-#   baseline sim-time 화) *이전* 산출물 — 새 eval 과 직접 비교 불가. 게이트를 쓰려면 old
-#   체크포인트들(MAPPO_sejong_dense·CTDE_sejong_dense)을 수정된 evaluate 로 30-episode
-#   재평가해 게이트 CSV 를 재생성할 것 (체크포인트는 유효 — 재학습 불필요).
+# ⚠️ 구 eval_sejong_dense_30.csv 는 지표 수정(waiting-time-memory 포화 해제 + sejong sim-time 화)
+#   *이전* 산출물 — 직접 비교 금지. 게이트 CSV 는 old 체크포인트(MAPPO_sejong_dense·
+#   CTDE_sejong_dense) 30-ep 재평가로 재생성 완료: results/eval_sejong_dense_30_regen.csv
+#   (+ stats: results/stats_eval_sejong_dense_30_regen/).
 
 # ── 기타 ─────────────────────────────────────────────────────────────────────
 python train_mappo.py --map 3x2 --num-iters 200              # 2 cols x 3 rows, all 2-lane
@@ -205,7 +208,7 @@ obs 레이아웃: base `[phase_onehot4, min_green1, density10, queue10]=25` + �
 | `--neighbor-obs` (N/S 혼잡 +4) | 29 | 29+6+29×4 = 151 |
 | `+--upstream-phase` (N/S 위상+경과 +10) | **39** | 39+6+39×4 = **201** |
 
-**Ablation 매트릭스** — 각 run 은 old CTDE(`eval_sejong_dense_30.csv`) + 동일조건 MAPPO 와 비교. 공정 위해 MAPPO 도 같은 obs 플래그로 재학습, warmup→dense weights-only resume 복제(`--upstream-phase` 는 양 phase 필수):
+**Ablation 매트릭스** — 각 run 은 old CTDE(`eval_sejong_dense_30_regen.csv`, 수정 지표 재평가본) + 동일조건 MAPPO 와 비교. 공정 위해 MAPPO 도 같은 obs 플래그로 재학습, warmup→dense weights-only resume 복제(`--upstream-phase` 는 양 phase 필수):
 
 | run | neighbor | upstream | β | brt_prog_w | obs/critic | 의미 |
 |---|---|---|---|---|---|---|

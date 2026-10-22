@@ -360,35 +360,40 @@ python stats_eval.py --csv results/eval_sejong_30.csv
 | Car avg_wait (s) | 56.85 | **31.07** | −45.3% |
 
 > 단일 MAPPO (decentralized critic) 학습만으로도 BRT corridor 우대 효과가 자연 발생 (BRT wait 가 일반차 wait 의 ½). CTDE 추가 시 추가 개선 기대.
+>
+> ⚠️ 이 표는 2026-06-11 지표 수정(waiting-time-memory 포화 해제) **이전** 산출물 — 비포화(LOS B-C) 시나리오라 왜곡은 작지만, 아래 세종 3-way 표와 절대값 비교는 금지.
 
 ### 세종시 실측 3-way 최종 평가 — 3x2-brt `--traffic high` (LOS D, 30 ep paired)
 
-세종시 6교차로 실측 수요(~8,530 veh/h) + 공공데이터포털·세담터 기반 per-TLS 실측 Fixed-Time을 베이스라인으로, MAPPO·CTDE를 **매 episode 동일 seed로 30회** 쌍대 평가한 결과. (`eval_sejong_dense_30.csv`, 모두 `time_to_teleport=300`, `teleported≈0~3`로 결과가 텔레포트 인공물 아님.)
+세종시 6교차로 실측 수요(~8,530 veh/h) + 공공데이터포털·세담터 기반 per-TLS 실측 Fixed-Time을 베이스라인으로, MAPPO·CTDE를 **매 episode 동일 seed로 30회** 쌍대 평가한 결과. (`eval_sejong_dense_30_regen.csv`, 모두 `time_to_teleport=300`, RL `teleported≈2~3`으로 결과가 텔레포트 인공물 아님.)
+
+> 📐 **2026-06-11 지표 수정 반영본**: SUMO `--waiting-time-memory` 기본값(100s)이 LOS D 에서 대기시간 지표를 차량당 ~100s 로 **포화**시키던 문제를 수정(10000s)하고, 세종 baseline 을 sim-time 스케줄로 바꿔 실측 사이클 길이(예 tl_0 140s)를 정확 재현한 뒤 **동일 체크포인트를 재평가**한 수치입니다. 포화가 대기 긴 Fixed 를 더 크게 잘라 왔으므로, 수정 후 RL 개선폭은 27%→**50%** 로 커졌습니다 (이전 표의 절대값과 직접 비교 불가).
 
 | 지표 | FixedTime(Sejong) | MAPPO | CTDE | RL 개선폭 (vs Fixed) |
 |------|------:|------:|------:|:--:|
-| 평균 대기시간 (s) | 63.65 | **46.45** | 46.57 | **−27.0%** |
-| 평균 통행시간 (s) | 284.56 | **166.62** | 171.00 | −41.4% |
-| Throughput (대/h) | 3,812 | **5,958** | 5,869 | **+56.3%** |
-| 총 대기열 길이 | 902,611 | **569,051** | 583,127 | −37.0% |
-| 평균 속도 (m/s) | 1.66 | **2.87** | 2.80 | +73.2% |
-| 차량당 CO₂ (mg) | 756,055 | **445,824** | 457,189 | −41.0% |
-| 텔레포트 (대) | 10.97 | **1.40** | 3.33 | −87.2% |
-| 차량당 정지 횟수 † | **2.42** | 3.39 | 3.44 | +40% (열위) |
-| **BRT 평균대기 (s)** | 44.34 | **24.56** | 26.04 | **−44.6%** |
-| 일반차 평균대기 (s) | 68.08 | **43.20** | 44.13 | −36.5% |
-| **BRT 평균속도 (m/s)** | 4.71 | **5.85** | 5.76 | **+24.2%** |
-| 방향별 대기 NS (s) | 254.8 | **57.1** | 58.7 | −77.6% |
-| 방향별 대기 EW (s) | 359.6 | **66.1** | 72.8 | −81.6% |
+| 평균 대기시간 (s) | 180.14 | **90.54** | 97.74 | **−49.7%** |
+| 평균 통행시간 (s) | 249.59 | **174.79** | 184.20 | −30.0% |
+| Throughput (대/h) | 4,030 | **5,772** | 5,500 | **+43.2%** |
+| 총 대기열 길이 | 859,901 | **544,052** | 565,612 | −36.7% |
+| 평균 속도 (m/s) | 1.80 | **2.73** | 2.57 | +51.8% |
+| 차량당 CO₂ (mg) | 708,194 | **462,913** | 488,514 | −34.6% |
+| 텔레포트 (대) | 24.27 | **2.30** | 3.03 | −90.5% |
+| 차량당 정지 횟수 † | **2.57** | 4.40 | 4.66 | +71% (열위) |
+| **BRT 평균대기 (s)** | 48.51 | **18.02** | 29.02 | **−62.9%** |
+| 일반차 평균대기 (s) | 188.69 | **65.79** | 71.10 | −65.1% |
+| **BRT 평균속도 (m/s)** | 5.14 | **6.60** | 6.36 | **+28.3%** |
+| 회랑 BRT 속도비 | 0.299 | **0.432** | 0.415 | +44.5% |
+| 방향별 대기 NS (s) | 226.1 | **37.7** | 43.0 | −83.3% |
+| 방향별 대기 EW (s) | 320.7 | **52.0** | 58.3 | −83.8% |
 
-> † **정지 횟수만 Fixed가 우위** — RL이 Fixed보다 **56% 더 많은 차량을 실제로 통과**시키기 때문(Fixed는 과포화에서 grid lock → 진입 자체가 막혀 통과 차량의 stop은 적게 집계). throughput·대기·통행시간을 모두 종합하면 RL 우위가 명확하며, BRT corridor(NS축)에서도 BRT 대기 −44.6%·속도 +24.2%로 우대 효과가 자연 발생.
+> † **정지 횟수만 Fixed가 우위** — RL이 Fixed보다 **43% 더 많은 차량을 실제로 통과**시키기 때문(Fixed는 과포화에서 grid lock → insertion loss 50% vs RL 30%, 진입 자체가 막혀 통과 차량의 stop은 적게 집계). throughput·대기·통행시간을 모두 종합하면 RL 우위가 명확하며, BRT corridor(NS축)에서도 BRT 대기 −62.9%·속도 +28.3%로 우대 효과가 자연 발생.
 
 **통계적 유의성** (`stats_eval.py`, n=30 paired, Friedman → Wilcoxon+Holm → A₁₂):
 
-- ★ **MAPPO·CTDE 모두 FixedTime 대비 30/30 시나리오 전부 우월** — 평균대기 IQM **−27.0%** [95% CI 26.5~27.5%], Wilcoxon+Holm **p = 5.6e-09**, **A₁₂ = 1.00**(large). 통행시간·throughput·대기열·CO₂·속도·텔레포트 8개 지표 전부 동일하게 유의 (모든 p < 1e-3).
-- **MAPPO vs CTDE**: 평균대기는 **통계적 동률**(p_holm = 0.78, A₁₂ = 0.538 negligible). 그 외 통행시간·throughput·대기열·CO₂·속도·텔레포트에서는 **MAPPO가 유의하게 우세**(A₁₂ 0.75~0.84, p < 0.05) — 현 CTDE는 평균만 맞먹고 분산이 큼(throughput/travel CI 폭이 MAPPO의 1.8~2.9배). → topology-aware CTDE 재학습(`--neighbor-obs`)의 게이트 = 이 분산 하락.
+- ★ **MAPPO·CTDE 모두 FixedTime 대비 30/30 시나리오 전부 우월** — MAPPO 평균대기 IQM **−49.4%** [95% CI 48.7~50.2%], Wilcoxon+Holm **p = 5.6e-09**, **A₁₂ = 1.00**(large). 통행시간·throughput·대기열·CO₂·속도·텔레포트 전부 동일하게 유의 (모든 p < 1e-4).
+- **MAPPO vs CTDE**: 수정 지표에선 **평균대기 포함 거의 전 지표에서 MAPPO 가 유의하게 우세**(평균대기 90.5 vs 97.7, p = 5.6e-09, A₁₂ = 1.00; 텔레포트만 n.s.). 구 포화 CSV 의 "평균대기 동률" 서사는 포화 인공물로 폐기. 현 CTDE 는 평균도 밀리고 **분산도 큼**(std 비 CTDE/MAPPO: throughput 6.4×, travel 2.8×, wait 3.6×). → topology-aware CTDE 재학습(`--neighbor-obs`)의 게이트 = 이 분산의 MAPPO 수준 하락 + 헤드라인 회복.
 
-산출 그림: `results/stats_eval_sejong_dense_30/figs/{box,forest}_*.png` (분포 박스플롯 / IQM±95% CI forest plot).
+산출 그림: `results/stats_eval_sejong_dense_30_regen/figs/{box,forest}_*.png` (분포 박스플롯 / IQM±95% CI forest plot).
 
 ---
 
@@ -490,3 +495,10 @@ GreenWave/
     howpublished = {\url{https://github.com/LucasAlegre/sumo-rl}},
 }
 ```
+
+### Further references
+
+- C. Yu et al., "The Surprising Effectiveness of PPO in Cooperative Multi-Agent Games," *NeurIPS Datasets and Benchmarks*, 2022. (MAPPO)
+- P. A. Lopez et al., "Microscopic Traffic Simulation using SUMO," *IEEE ITSC*, 2018.
+- E. Liang et al., "RLlib: Abstractions for Distributed Reinforcement Learning," *ICML*, 2018.
+- J. K. Terry et al., "PettingZoo: Gym for Multi-Agent Reinforcement Learning," *NeurIPS*, 2021.

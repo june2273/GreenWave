@@ -1,0 +1,80 @@
+=== 발표용 헤드라인 ===
+  ★ MAPPO 는 FixedTime(Sejong) 대비 동일 30개 시나리오 중 30개 우월 (Wilcoxon+Holm p=5.59e-09, A12=1.00, 평균대기 IQM 49.4% 개선 [95% CI 48.7~50.2%]).
+  ★ CTDE 는 FixedTime(Sejong) 대비 동일 30개 시나리오 중 30개 우월 (Wilcoxon+Holm p=5.59e-09, A12=1.00, 평균대기 IQM 45.8% 개선 [95% CI 45.0~46.7%]).
+
+입력 CSV : results/eval_sejong_dense_30_regen.csv
+알고리즘 : ['MAPPO', 'CTDE', 'FixedTime(Sejong)']  (baseline=FixedTime(Sejong))
+부트스트랩 : n_boot=10000, alpha=0.05, seed=0
+
+━━━ avg_waiting_time  (↓작을수록 우수, n=30 paired blocks) ━━━
+  MAPPO              mean=   90.535 [  90.187,  90.903]  IQM=   90.615 [  90.260,  90.895]
+  CTDE               mean=   97.737 [  96.663,  99.216]  IQM=   96.989 [  96.487,  97.569]
+  FixedTime(Sejong)  mean=  180.140 [ 177.952, 182.559]  IQM=  178.957 [ 176.760, 181.837]
+  Friedman χ²=60.000  p=9.358e-14  유의
+  MAPPO vs CTDE               W=    0.0 p_holm=5.588e-09 A12=1.000(large) 유의  →  MAPPO 우세
+  MAPPO vs FixedTime(Sejong)  W=    0.0 p_holm=5.588e-09 A12=1.000(large) 유의  →  MAPPO 우세
+  CTDE vs FixedTime(Sejong)  W=    0.0 p_holm=5.588e-09 A12=1.000(large) 유의  →  CTDE 우세
+
+━━━ avg_travel_time  (↓작을수록 우수, n=30 paired blocks) ━━━
+  MAPPO              mean=  174.790 [ 174.246, 175.317]  IQM=  175.005 [ 174.298, 175.481]
+  CTDE               mean=  184.198 [ 182.987, 185.856]  IQM=  183.317 [ 182.778, 183.980]
+  FixedTime(Sejong)  mean=  249.593 [ 247.158, 252.246]  IQM=  248.412 [ 245.858, 251.603]
+  Friedman χ²=60.000  p=9.358e-14  유의
+  MAPPO vs CTDE               W=    0.0 p_holm=5.588e-09 A12=1.000(large) 유의  →  MAPPO 우세
+  MAPPO vs FixedTime(Sejong)  W=    0.0 p_holm=5.588e-09 A12=1.000(large) 유의  →  MAPPO 우세
+  CTDE vs FixedTime(Sejong)  W=    0.0 p_holm=5.588e-09 A12=1.000(large) 유의  →  CTDE 우세
+
+━━━ total_queue_length  (↓작을수록 우수, n=30 paired blocks) ━━━
+  MAPPO              mean=544052.000 [542312.426,545986.362]  IQM=543873.688 [542292.188,545445.881]
+  CTDE               mean=565612.100 [558194.588,577108.016]  IQM=559033.625 [556813.405,562228.245]
+  FixedTime(Sejong)  mean=859901.100 [850931.911,867935.164]  IQM=862731.875 [855827.830,868931.950]
+  Friedman χ²=58.067  p=2.46e-13  유의
+  MAPPO vs CTDE               W=    1.0 p_holm=5.588e-09 A12=0.973(large) 유의  →  MAPPO 우세
+  MAPPO vs FixedTime(Sejong)  W=    0.0 p_holm=5.588e-09 A12=1.000(large) 유의  →  MAPPO 우세
+  CTDE vs FixedTime(Sejong)  W=    0.0 p_holm=5.588e-09 A12=1.000(large) 유의  →  CTDE 우세
+
+━━━ throughput  (↑클수록 우수, n=30 paired blocks) ━━━
+  MAPPO              mean= 5771.633 [5761.699,5780.667]  IQM= 5773.250 [5765.125,5780.750]
+  CTDE               mean= 5499.600 [5429.399,5540.701]  IQM= 5533.062 [5521.062,5542.250]
+  FixedTime(Sejong)  mean= 4029.867 [3995.467,4067.535]  IQM= 4021.875 [3999.250,4039.188]
+  Friedman χ²=60.000  p=9.358e-14  유의
+  MAPPO vs CTDE               W=    0.0 p_holm=5.18e-06 A12=1.000(large) 유의  →  MAPPO 우세
+  MAPPO vs FixedTime(Sejong)  W=    0.0 p_holm=5.18e-06 A12=1.000(large) 유의  →  MAPPO 우세
+  CTDE vs FixedTime(Sejong)  W=    0.0 p_holm=5.18e-06 A12=1.000(large) 유의  →  CTDE 우세
+
+━━━ teleported  (↓작을수록 우수, n=30 paired blocks) ━━━
+  MAPPO              mean=    2.300 [   1.500,   3.167]  IQM=    1.688 [   1.000,   2.625]
+  CTDE               mean=    3.033 [   1.467,   5.500]  IQM=    1.688 [   1.000,   2.625]
+  FixedTime(Sejong)  mean=   24.267 [  20.133,  28.067]  IQM=   26.812 [  22.500,  29.812]
+  Friedman χ²=30.474  p=2.414e-07  유의
+  MAPPO vs CTDE               W=  172.0 p_holm=0.9287 A12=0.497(negligible) n.s.  →  CTDE 우세
+  MAPPO vs FixedTime(Sejong)  W=    6.0 p_holm=1.281e-05 A12=0.889(large) 유의  →  MAPPO 우세
+  CTDE vs FixedTime(Sejong)  W=    5.0 p_holm=1.281e-05 A12=0.869(large) 유의  →  CTDE 우세
+
+━━━ avg_stops_per_vehicle  (↓작을수록 우수, n=30 paired blocks) ━━━
+  MAPPO              mean=    4.399 [   4.377,   4.420]  IQM=    4.410 [   4.380,   4.429]
+  CTDE               mean=    4.659 [   4.636,   4.685]  IQM=    4.651 [   4.632,   4.670]
+  FixedTime(Sejong)  mean=    2.570 [   2.543,   2.597]  IQM=    2.557 [   2.527,   2.597]
+  Friedman χ²=60.000  p=9.358e-14  유의
+  MAPPO vs CTDE               W=    0.0 p_holm=5.588e-09 A12=1.000(large) 유의  →  MAPPO 우세
+  MAPPO vs FixedTime(Sejong)  W=    0.0 p_holm=5.588e-09 A12=0.000(large) 유의  →  FixedTime(Sejong) 우세
+  CTDE vs FixedTime(Sejong)  W=    0.0 p_holm=5.588e-09 A12=0.000(large) 유의  →  FixedTime(Sejong) 우세
+
+━━━ avg_co2_per_vehicle  (↓작을수록 우수, n=30 paired blocks) ━━━
+  MAPPO              mean=462912.879 [461409.543,464398.756]  IQM=463199.866 [461367.872,464548.301]
+  CTDE               mean=488513.639 [482895.499,497840.858]  IQM=483491.689 [481938.540,485428.884]
+  FixedTime(Sejong)  mean=708194.493 [699482.322,716328.960]  IQM=709322.420 [703838.183,715526.601]
+  Friedman χ²=60.000  p=9.358e-14  유의
+  MAPPO vs CTDE               W=    0.0 p_holm=5.588e-09 A12=1.000(large) 유의  →  MAPPO 우세
+  MAPPO vs FixedTime(Sejong)  W=    0.0 p_holm=5.588e-09 A12=1.000(large) 유의  →  MAPPO 우세
+  CTDE vs FixedTime(Sejong)  W=    0.0 p_holm=5.588e-09 A12=1.000(large) 유의  →  CTDE 우세
+
+━━━ avg_speed  (↑클수록 우수, n=30 paired blocks) ━━━
+  MAPPO              mean=    2.730 [   2.722,   2.739]  IQM=    2.729 [   2.721,   2.739]
+  CTDE               mean=    2.573 [   2.528,   2.600]  IQM=    2.597 [   2.588,   2.604]
+  FixedTime(Sejong)  mean=    1.798 [   1.774,   1.824]  IQM=    1.788 [   1.773,   1.804]
+  Friedman χ²=60.000  p=9.358e-14  유의
+  MAPPO vs CTDE               W=    0.0 p_holm=5.588e-09 A12=1.000(large) 유의  →  MAPPO 우세
+  MAPPO vs FixedTime(Sejong)  W=    0.0 p_holm=5.588e-09 A12=1.000(large) 유의  →  MAPPO 우세
+  CTDE vs FixedTime(Sejong)  W=    0.0 p_holm=5.588e-09 A12=1.000(large) 유의  →  CTDE 우세
+

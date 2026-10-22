@@ -1,0 +1,33 @@
+metric,test,pair,n,statistic,p_raw,p_holm,a12,magnitude,significant
+avg_waiting_time,Friedman,ALL,30,60.0,9.357622968840163e-14,9.357622968840163e-14,,,True
+avg_waiting_time,Wilcoxon,MAPPO vs CTDE,30,0.0,1.862645149230957e-09,5.587935447692871e-09,1.0,large,True
+avg_waiting_time,Wilcoxon,MAPPO vs FixedTime(Sejong),30,0.0,1.862645149230957e-09,5.587935447692871e-09,1.0,large,True
+avg_waiting_time,Wilcoxon,CTDE vs FixedTime(Sejong),30,0.0,1.862645149230957e-09,5.587935447692871e-09,1.0,large,True
+avg_travel_time,Friedman,ALL,30,60.0,9.357622968840163e-14,9.357622968840163e-14,,,True
+avg_travel_time,Wilcoxon,MAPPO vs CTDE,30,0.0,1.862645149230957e-09,5.587935447692871e-09,1.0,large,True
+avg_travel_time,Wilcoxon,MAPPO vs FixedTime(Sejong),30,0.0,1.862645149230957e-09,5.587935447692871e-09,1.0,large,True
+avg_travel_time,Wilcoxon,CTDE vs FixedTime(Sejong),30,0.0,1.862645149230957e-09,5.587935447692871e-09,1.0,large,True
+total_queue_length,Friedman,ALL,30,58.06666666666666,2.4602743683859483e-13,2.4602743683859483e-13,,,True
+total_queue_length,Wilcoxon,MAPPO vs CTDE,30,1.0,3.725290298461914e-09,5.587935447692871e-09,0.9733333333333334,large,True
+total_queue_length,Wilcoxon,MAPPO vs FixedTime(Sejong),30,0.0,1.862645149230957e-09,5.587935447692871e-09,1.0,large,True
+total_queue_length,Wilcoxon,CTDE vs FixedTime(Sejong),30,0.0,1.862645149230957e-09,5.587935447692871e-09,1.0,large,True
+throughput,Friedman,ALL,30,60.0,9.357622968840163e-14,9.357622968840163e-14,,,True
+throughput,Wilcoxon,MAPPO vs CTDE,30,0.0,1.726772765612998e-06,5.180318296838994e-06,1.0,large,True
+throughput,Wilcoxon,MAPPO vs FixedTime(Sejong),30,0.0,1.7322162331441138e-06,5.180318296838994e-06,1.0,large,True
+throughput,Wilcoxon,CTDE vs FixedTime(Sejong),30,0.0,1.7322162331441138e-06,5.180318296838994e-06,1.0,large,True
+teleported,Friedman,ALL,30,30.473684210526304,2.4139237743733583e-07,2.4139237743733583e-07,,,True
+teleported,Wilcoxon,MAPPO vs CTDE,30,172.0,0.9287387766534011,0.9287387766534011,0.49722222222222223,negligible,False
+teleported,Wilcoxon,MAPPO vs FixedTime(Sejong),30,6.0,4.742939115919062e-06,1.28121778517467e-05,0.8888888888888888,large,True
+teleported,Wilcoxon,CTDE vs FixedTime(Sejong),30,5.0,4.2707259505822334e-06,1.28121778517467e-05,0.8688888888888888,large,True
+avg_stops_per_vehicle,Friedman,ALL,30,60.0,9.357622968840163e-14,9.357622968840163e-14,,,True
+avg_stops_per_vehicle,Wilcoxon,MAPPO vs CTDE,30,0.0,1.862645149230957e-09,5.587935447692871e-09,1.0,large,True
+avg_stops_per_vehicle,Wilcoxon,MAPPO vs FixedTime(Sejong),30,0.0,1.862645149230957e-09,5.587935447692871e-09,0.0,large,True
+avg_stops_per_vehicle,Wilcoxon,CTDE vs FixedTime(Sejong),30,0.0,1.862645149230957e-09,5.587935447692871e-09,0.0,large,True
+avg_co2_per_vehicle,Friedman,ALL,30,60.0,9.357622968840163e-14,9.357622968840163e-14,,,True
+avg_co2_per_vehicle,Wilcoxon,MAPPO vs CTDE,30,0.0,1.862645149230957e-09,5.587935447692871e-09,1.0,large,True
+avg_co2_per_vehicle,Wilcoxon,MAPPO vs FixedTime(Sejong),30,0.0,1.862645149230957e-09,5.587935447692871e-09,1.0,large,True
+avg_co2_per_vehicle,Wilcoxon,CTDE vs FixedTime(Sejong),30,0.0,1.862645149230957e-09,5.587935447692871e-09,1.0,large,True
+avg_speed,Friedman,ALL,30,60.0,9.357622968840163e-14,9.357622968840163e-14,,,True
+avg_speed,Wilcoxon,MAPPO vs CTDE,30,0.0,1.862645149230957e-09,5.587935447692871e-09,1.0,large,True
+avg_speed,Wilcoxon,MAPPO vs FixedTime(Sejong),30,0.0,1.862645149230957e-09,5.587935447692871e-09,1.0,large,True
+avg_speed,Wilcoxon,CTDE vs FixedTime(Sejong),30,0.0,1.862645149230957e-09,5.587935447692871e-09,1.0,large,True
