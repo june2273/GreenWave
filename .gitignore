@@ -264,3 +264,7 @@ cython_debug/
 # Auto-generated SUMO network (rebuilt by _maybe_build_network() at runtime)
 sumo_data/single/single_intersection.net.xml
 
+.env.*
+!.env.example
+.dev.vars
+.wrangler/

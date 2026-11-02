@@ -2,9 +2,10 @@
 
 Multi-agent reinforcement learning (MAPPO) for traffic signals at six intersections on a SUMO model of a BRT corridor in Sejong, Korea, compared against the city's measured fixed-time signal plans. **Simulation only** — nothing here has been tested on real signals.
 
-![Average waiting time, IQM ± 95% CI over 30 paired episodes](samples/results/sejong%203-way/figs/forest_avg_waiting_time.png)
-
-Side-by-side video (Fixed-Time | MAPPO | CTDE): [samples/videos/sejong 3-way/3x2compare_3way_1080p.mp4](samples/videos/sejong%203-way/3x2compare_3way_1080p.mp4)
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/stack-dark.png">
+  <img src="docs/stack.png" alt="Public counts and signal timings feed a SUMO 1.20 model of the Sejong 3x2-brt corridor; a PettingZoo env with 6 agents exchanges observations and actions over TraCI with Ray RLlib (MAPPO, CTDE) and PyTorch actor-critic; the measured fixed-time plans run as the baseline, and stats_eval.py compares 30 paired episodes" width="100%">
+</picture>
 
 ## Problem
 
@@ -23,6 +24,10 @@ Fixed-time signals repeat the same cycle regardless of the queues in front of th
 ### Sejong 3-way, `3x2-brt --traffic high` (LOS D, 30 paired episodes)
 
 Re-evaluated on 2026-06-11 after fixing a metric bug: SUMO's default `--waiting-time-memory` (100 s) capped waiting time per vehicle at ~100 s under LOS D. With the fix, the RL improvement in average waiting time grew from 27% to 50%. Older tables are not comparable in absolute terms.
+
+![Average waiting time, IQM ± 95% CI over 30 paired episodes](samples/results/sejong%203-way/figs/forest_avg_waiting_time.png)
+
+Side-by-side video (Fixed-Time | MAPPO | CTDE): [samples/videos/sejong 3-way/3x2compare_3way_1080p.mp4](samples/videos/sejong%203-way/3x2compare_3way_1080p.mp4)
 
 | Metric | FixedTime (Sejong) | MAPPO | CTDE | RL vs Fixed |
 |------|------:|------:|------:|:--:|
@@ -74,6 +79,7 @@ This table predates the 2026-06-11 metric fix. The scenario is not saturated (LO
 - SUMO 1.20 via TraCI / sumolib, PettingZoo, Gymnasium
 - numpy, pandas; statistics in `stats_eval.py`
 - matplotlib + imageio for rollout videos, TensorBoard for training curves
+- Diagram: [stack-diagram](https://github.com/caru-ini/stack-diagram) (icons: devicon, Lucide, SUMO, Ray)
 
 ## Run
 

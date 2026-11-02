@@ -5,6 +5,11 @@
 > MAPPO 기반 다중 교차로 신호제어 강화학습 프레임워크  
 > Multi-Agent PPO · SUMO Traffic Simulator · RLlib · PettingZoo
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/stack-dark.png">
+  <img src="docs/stack.png" alt="공개 교통량·신호 자료로 만든 세종 3x2-brt SUMO 1.20 모델에서 PettingZoo 환경(6 agent)이 TraCI로 Ray RLlib(MAPPO·CTDE, PyTorch)과 관측·행동을 주고받고, 실측 고정신호를 기준선으로 stats_eval.py가 30개 paired episode를 비교하는 구조" width="100%">
+</picture>
+
 ---
 
 ## Overview
